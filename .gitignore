@@ -1,0 +1,56 @@
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Data files
+*.npy
+*.npz
+*.aedat4
+*.rar
+*.zip
+
+# Model checkpoints
+*.ckpt
+*.pth
+*.pt
+ckpt/
+
+# Logs and outputs
+*.log
+summary/
+runs/
+*.mp4
+*.avi
+demo.mp4
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.tox/
+
+# CUDA
+*.cu
+*.cubin
+*.ptx
+
+# Misc
+*.bak
+*.tmp
