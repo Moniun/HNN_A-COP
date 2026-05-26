@@ -1,4 +1,4 @@
-from aedat4_dataset import TurningDiskDataset
+from tmdat_dataset import TurningDiskDataset
 from model import TurningDiskSiamFC
 import numpy as np
 import torch
@@ -33,7 +33,8 @@ def train_siamfc():
 
     for epoch in tqdm(range(epoch_num)):
         for step, data in enumerate(train_data):
-            net_out = net(*[x.cuda() for x in data])
+            aop, td, sd, aop_loc, target_loc = data
+            net_out = net(aop.cuda(), sd.cuda(), td.cuda(), aop_loc.cuda(), target_loc.cuda(), training=True)
             optimizer.zero_grad()
             loss = net_out['loss'].mean()
             loss.backward()
@@ -53,32 +54,35 @@ def test_siamfc():
     net = TurningDiskSiamFC().cuda()
     net.load_state_dict(torch.load(load_ckpt_path, map_location=torch.device("cuda:0")))
     train_data = DataLoader(TurningDiskDataset(test=True), batch_size=1, pin_memory=True, shuffle=False)
-    video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (145, 145))
+    video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (320, 640))  # 天眸c原生分辨率
 
     for step, data in enumerate(train_data):
-        aps, dvs, aps_loc, dvs_loc = data
-        net_out = net(aps.cuda(), dvs.cuda(), aps_loc.cuda(), dvs_loc.cuda(), training=False)
+        aop, td, sd, aop_loc, target_loc = data
+        net_out = net(aop.cuda(), sd.cuda(), td.cuda(), aop_loc.cuda(), target_loc.cuda(), training=False)
 
         pred_loc = net_out['pred_loc'].squeeze().data.cpu().numpy().astype(np.int64)
         gt_loc = net_out['gt_loc'].squeeze().data.cpu().numpy().astype(np.int64)
-        aps = aps.squeeze().data.cpu().numpy().astype(np.uint8)
-        dvs = dvs.squeeze()[1].data.cpu().numpy().astype(np.uint8)
+        aop = aop.squeeze().data.cpu().numpy().astype(np.uint8)
+        
+        # 可视化SD事件（取正极性通道）
+        sd_vis = sd.squeeze()[0].data.cpu().numpy().astype(np.uint8)
 
         for t in range(gt_loc.shape[2]):
             plt.gca().clear()
-            img = cv2.cvtColor(aps, cv2.COLOR_GRAY2RGB)
-            img[dvs[..., t] != 0, 0] = 255
+            img = cv2.cvtColor(aop.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)  # 转换为BGR用于OpenCV
+            # 在图像上叠加AOP帧和SD事件
+            sd_resized = cv2.resize(sd_vis[..., t], (640, 320))
+            img[sd_resized != 0, 2] = 255  # 红色标记事件
+            
             for o in range(gt_loc.shape[0]):
                 px, py = pred_loc[o, :, t]
                 gx, gy = gt_loc[o, :, t]
-                img = cv2.rectangle(img, (px-10, py-10), (px+10, py+10), (0, 0, 255), 1)
-                img = cv2.rectangle(img, (gx-10, gy-10), (gx+10, gy+10), (0, 255, 0), 1)
-                # label = "cross" if o == 0 else "triangle" if o == 1 else "circle"
-                # cv2.putText(img, label, (gx + 2, gy - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.25, (0, 255, 0), 1)
+                img = cv2.rectangle(img, (px-10, py-10), (px+10, py+10), (0, 0, 255), 1)  # 红色预测框
+                img = cv2.rectangle(img, (gx-10, gy-10), (gx+10, gy+10), (0, 255, 0), 1)  # 绿色真实框
 
-            plt.imshow(img)
+            plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             plt.pause(0.1)
-            video.write(img[:, :, ::-1])
+            video.write(img)
     video.release()
 
 

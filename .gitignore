@@ -11,6 +11,9 @@ __pycache__/
 *.aedat4
 *.rar
 *.zip
+*.7z
+*.tmdat
+*.txt
 
 # Model checkpoints
 *.ckpt
@@ -54,3 +57,6 @@ env/
 # Misc
 *.bak
 *.tmp
+
+# copy
+* copy.py

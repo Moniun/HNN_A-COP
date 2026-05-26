@@ -84,7 +84,10 @@ class TurningDiskSiamFC(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.aps_net = ResNet2Stage(inchannel=1, block_num=[1, 1])
-        self.dvs_net = ResNet2StageSNN(inchannel=2, block_num=[1, 1])
+        
+        # ⭐ 两条独立的SNN通路（参数独立）
+        self.sd_net = ResNet2StageSNN(inchannel=2, block_num=[1, 1])  # SD通路
+        self.td_net = ResNet2StageSNN(inchannel=2, block_num=[1, 1])  # TD通路
 
     def corr_up(self, x, k):
         c = torch.nn.functional.conv2d(x, k).unflatten(1, (x.shape[0], k.shape[0]//x.shape[0])).diagonal().permute(3, 0, 1, 2)
@@ -131,20 +134,30 @@ class TurningDiskSiamFC(torch.nn.Module):
         target_loc = tenGrid.flatten(start_dim=-2).gather(dim=-1, index=index).squeeze(dim=-1)
         return target_loc
 
-    def forward(self, aps, dvs, aps_loc, dvs_loc, training=True):
-        bs, _, h, w, ts = dvs.shape
-        aps_feature = self.aps_net.step(aps)
-        dvs_feature = self.dvs_net(dvs)
-        kernel = self.extract_clip(aps_feature, aps_loc, (3, 3))
+    def forward(self, aop, sd, td, aop_loc, target_loc, training=True):
+        bs, c, h, w, ts = sd.shape  # SD和TD形状相同
+        
+        # ANN处理AOP帧（天眸相机的Acquisition Output Path）
+        aop_feature = self.aps_net.step(aop)
+        
+        # ⭐ 两条独立SNN通路
+        sd_feature = self.sd_net(sd)   # SD事件处理
+        td_feature = self.td_net(td)   # TD事件处理
+        
+        # ⭐ 通道维度相加融合（保持通道数不变）
+        dvs_feature = (sd_feature + td_feature) / 2
+        
+        # 相关层处理
+        kernel = self.extract_clip(aop_feature, aop_loc, (3, 3))
         cm = torch.stack([self.corr_up(dvs_feature[..., t], kernel) for t in range(ts)], -1)
 
         if training:
             l_reg = 0.1
-            gt_cm = self.gen_gt_cm(dvs_loc, cm.shape[2:4])
+            gt_cm = self.gen_gt_cm(target_loc, cm.shape[2:4])
             loss = - (gt_cm * cm).sum(dim=(2, 3)) + l_reg * torch.pow(cm * (gt_cm != 0), 2).sum(dim=(2, 3))
             loss = loss.mean(dim=(1, 2))
             return {"loss": loss, "cm": cm}
         else:
-            pred_loc = self.get_target_loc(cm, aps.shape[-2:][::-1])
-            dvs_loc = dvs_loc * 8 + torch.tensor(aps.shape[-2:][::-1]).view(1, 1, 2, 1).to(dvs_loc.device) / 2 - 0.5
-            return {"cm": cm, "pred_loc": pred_loc, "aps": aps, "dvs": dvs, "gt_loc": dvs_loc}
+            pred_loc = self.get_target_loc(cm, aop.shape[-2:][::-1])
+            target_loc = target_loc * 8 + torch.tensor(aop.shape[-2:][::-1]).view(1, 1, 2, 1).to(target_loc.device) / 2 - 0.5
+            return {"cm": cm, "pred_loc": pred_loc, "aop": aop, "sd": sd, "td": td, "gt_loc": target_loc}
