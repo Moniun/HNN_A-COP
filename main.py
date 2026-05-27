@@ -33,8 +33,8 @@ def train_siamfc():
 
     for epoch in tqdm(range(epoch_num)):
         for step, data in enumerate(train_data):
-            aop, td, sd, aop_loc, target_loc = data
-            net_out = net(aop.cuda(), sd.cuda(), td.cuda(), aop_loc.cuda(), target_loc.cuda(), training=True)
+            cop, td, sd, cop_loc, target_loc = data
+            net_out = net(cop.cuda(), sd.cuda(), td.cuda(), cop_loc.cuda(), target_loc.cuda(), training=True)
             optimizer.zero_grad()
             loss = net_out['loss'].mean()
             loss.backward()
@@ -57,20 +57,20 @@ def test_siamfc():
     video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (320, 640))  # 天眸c原生分辨率
 
     for step, data in enumerate(train_data):
-        aop, td, sd, aop_loc, target_loc = data
-        net_out = net(aop.cuda(), sd.cuda(), td.cuda(), aop_loc.cuda(), target_loc.cuda(), training=False)
+        cop, td, sd, cop_loc, target_loc = data
+        net_out = net(cop.cuda(), sd.cuda(), td.cuda(), cop_loc.cuda(), target_loc.cuda(), training=False)
 
         pred_loc = net_out['pred_loc'].squeeze().data.cpu().numpy().astype(np.int64)
         gt_loc = net_out['gt_loc'].squeeze().data.cpu().numpy().astype(np.int64)
-        aop = aop.squeeze().data.cpu().numpy().astype(np.uint8)
+        cop = cop.squeeze().data.cpu().numpy().astype(np.uint8)
         
         # 可视化SD事件（取正极性通道）
         sd_vis = sd.squeeze()[0].data.cpu().numpy().astype(np.uint8)
 
         for t in range(gt_loc.shape[2]):
             plt.gca().clear()
-            img = cv2.cvtColor(aop.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)  # 转换为BGR用于OpenCV
-            # 在图像上叠加AOP帧和SD事件
+            img = cv2.cvtColor(cop.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)  # 转换为BGR用于OpenCV
+            # 在图像上叠加COP帧和SD事件
             sd_resized = cv2.resize(sd_vis[..., t], (640, 320))
             img[sd_resized != 0, 2] = 255  # 红色标记事件
             

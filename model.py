@@ -83,11 +83,11 @@ class ResNet2Stage(nn.Module):
 class TurningDiskSiamFC(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.aps_net = ResNet2Stage(inchannel=1, block_num=[1, 1])
+        self.cop_net = ResNet2Stage(inchannel=3, block_num=[1, 1])
         
         # ⭐ 两条独立的SNN通路（参数独立）
         self.sd_net = ResNet2StageSNN(inchannel=2, block_num=[1, 1])  # SD通路
-        self.td_net = ResNet2StageSNN(inchannel=2, block_num=[1, 1])  # TD通路
+        self.td_net = ResNet2StageSNN(inchannel=1, block_num=[1, 1])  # TD通路
 
     def corr_up(self, x, k):
         c = torch.nn.functional.conv2d(x, k).unflatten(1, (x.shape[0], k.shape[0]//x.shape[0])).diagonal().permute(3, 0, 1, 2)
@@ -125,39 +125,62 @@ class TurningDiskSiamFC(torch.nn.Module):
         return gt_cm.permute(0, 1, 3, 4, 2)
 
     def get_target_loc(self, cm, img_size):
-        iw, ih = img_size
+        iw, ih = img_size  # 目标的真实画布尺寸: iw=640, ih=320
         bs, ns, h, w, ts = cm.shape
-        tenHorizontal = (torch.arange(0, w).expand(1, 1, 1, h, w) - w / 2 + 0.5) * 8 + iw / 2
-        tenVertical = (torch.arange(0, h).unsqueeze(-1).expand(1, 1, 1, h, w) - h / 2 + 0.5) * 8 + ih / 2
+        
+        # 💡 核心修正：响应图网络网格来自于 AOP (160x160) 的特征空间，降采样率为 8
+        # 当映射回 320x640 的 COP 空间时：
+        # X轴总步长 Stride = 8 * (640 / 160) = 32 像素
+        # Y轴总步长 Stride = 8 * (320 / 160) = 16 像素
+        tenHorizontal = (torch.arange(0, w).expand(1, 1, 1, h, w) - w / 2 + 0.5).to(cm.device) * 32 + iw / 2
+        tenVertical = (torch.arange(0, h).unsqueeze(-1).expand(1, 1, 1, h, w) - h / 2 + 0.5).to(cm.device) * 16 + ih / 2
+        
         tenGrid = torch.stack([tenHorizontal, tenVertical], 2).to(cm.device).expand(bs, ns, 2, ts, h, w)
         index = cm.permute(0, 1, 4, 2, 3).flatten(start_dim=-2).argmax(dim=-1, keepdim=True).unsqueeze(2).expand(bs, ns, 2, ts, 1)
         target_loc = tenGrid.flatten(start_dim=-2).gather(dim=-1, index=index).squeeze(dim=-1)
         return target_loc
 
-    def forward(self, aop, sd, td, aop_loc, target_loc, training=True):
-        bs, c, h, w, ts = sd.shape  # SD和TD形状相同
+    def forward(self, cop, sd, td, cop_loc, target_loc, training=True):
+        bs, c, h, w, ts = sd.shape  # SD和TD形状相同，来自原生的 AOP (160x160)
         
-        # ANN处理AOP帧（天眸相机的Acquisition Output Path）
-        aop_feature = self.aps_net.step(aop)
+        # 1. 从原生的 COP 帧中提取静态高维特征 [BS, 3, 320, 640] -> [BS, 512, H_feat, W_feat]
+        cop_feature = self.cop_net.step(cop)
         
-        # ⭐ 两条独立SNN通路
-        sd_feature = self.sd_net(sd)   # SD事件处理
-        td_feature = self.td_net(td)   # TD事件处理
+        # 2. 两条独立的脉冲残差通路提取时空特征
+        sd_feature = self.sd_net(sd)   # SD事件空间结构处理
+        td_feature = self.td_net(td)   # TD事件瞬态运动处理
         
-        # ⭐ 通道维度相加融合（保持通道数不变）
+        # 通道维度融合（保持通道数不变）
         dvs_feature = (sd_feature + td_feature) / 2
         
-        # 相关层处理
-        kernel = self.extract_clip(aop_feature, aop_loc, (3, 3))
+        # 3. 密集互相关（Siamese 追踪核心）
+        kernel = self.extract_clip(cop_feature, cop_loc, (3, 3))
         cm = torch.stack([self.corr_up(dvs_feature[..., t], kernel) for t in range(ts)], -1)
-
+        
         if training:
             l_reg = 0.1
+            # 💡 修正点 1：target_loc 来自 Dataset(160x160/8)，已处于特征图尺度，直接送入即可
             gt_cm = self.gen_gt_cm(target_loc, cm.shape[2:4])
             loss = - (gt_cm * cm).sum(dim=(2, 3)) + l_reg * torch.pow(cm * (gt_cm != 0), 2).sum(dim=(2, 3))
             loss = loss.mean(dim=(1, 2))
             return {"loss": loss, "cm": cm}
         else:
-            pred_loc = self.get_target_loc(cm, aop.shape[-2:][::-1])
-            target_loc = target_loc * 8 + torch.tensor(aop.shape[-2:][::-1]).view(1, 1, 2, 1).to(target_loc.device) / 2 - 0.5
-            return {"cm": cm, "pred_loc": pred_loc, "aop": aop, "sd": sd, "td": td, "gt_loc": target_loc}
+            # 💡 修正点 2：测试模式下，恢复 pred_loc 需要配合重写后的 get_target_loc 算子
+            pred_loc = self.get_target_loc(cm, cop.shape[-2:][::-1])
+            
+            # 💡 修正点 3：真值 target_loc 的物理尺度还原（实现 AOP 160x160 到 COP 320x640 的各向异性映射）
+            aop_offset = target_loc * 8  # 还原回 160x160 尺度下的绝对像素中心偏移量
+            
+            # X轴：160像素映射到640像素（放大 640/160 = 4 倍）
+            cop_offset_x = aop_offset[..., 0] * (640.0 / 160.0)
+            # Y轴：160像素映射到320像素（放大 320/160 = 2 倍）
+            cop_offset_y = aop_offset[..., 1] * (320.0 / 160.0)
+            
+            # 重新拼合特征通道
+            cop_offset = torch.stack([cop_offset_x, cop_offset_y], dim=-2)
+            
+            # 叠加上 COP 图像（320x640）的绝对物理中心像素坐标
+            cop_center = torch.tensor(cop.shape[-2:][::-1]).view(1, 1, 2, 1).to(target_loc.device) / 2 - 0.5
+            gt_loc_output = cop_offset + cop_center
+            
+            return {"cm": cm, "pred_loc": pred_loc, "cop": cop, "sd": sd, "td": td, "gt_loc": gt_loc_output}

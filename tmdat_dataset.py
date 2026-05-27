@@ -25,13 +25,13 @@ class TurningDiskDataset(Dataset):
         return self.frames.shape[0]
     
     def __getitem__(self, item):
-        aop = self.frames[item]       # 形状: [3, 320, 640] (天眸c原生RGB分辨率)
+        cop = self.frames[item]       # 形状: [3, 320, 640] (天眸c原生RGB分辨率)
         td = self.td_events[item]     # 形状: [1, 160, 160, T] (天眸c原生AOP分辨率)
         sd = self.sd_events[item]     # 形状: [2, 160, 160, T] (天眸c原生AOP分辨率)
         
-        # 1. 提取AOP帧中的多目标位置真值标签 [Num_Objects, 2]
+        # 1. 提取COP帧中的多目标位置真值标签 [Num_Objects, 2]
         # 传入 get_target 的图像形状转换为 [H, W, C] 以匹配 OpenCV 接口
-        aop_loc = self.get_target(aop.transpose(1, 2, 0), isFrame=True)
+        cop_loc = self.get_target(cop.transpose(1, 2, 0), isFrame=True)
         
         # 2. 逐时间步提取TD事件中的多目标运动轨迹真值 [Num_Objects, 2, T]
         # get_target 内部会自适应 td 此时的 [160, 160] 尺寸进行质心归一化
@@ -41,7 +41,7 @@ class TurningDiskDataset(Dataset):
         ], -1)
         
         # 【完美对接网络接口】返回5个元素，其空间长宽和时间步完全保持原生或叠加后的状态
-        return aop, td, sd, aop_loc, target_loc
+        return cop, td, sd, cop_loc, target_loc
 
     @staticmethod
     def get_target(img, isFrame=True):
@@ -85,11 +85,10 @@ class TurningDiskDataset(Dataset):
         # 归一化中心坐标 (完全依据当前 img_bin 的物理长宽自适应)
         center = center - np.array(img_bin.shape[:2])[np.newaxis, ::-1] / 2 + 0.5
         
-        # 💡 注意：这里的 / 8 是为了对齐原网络的 Feature Map 缩放尺度。
-        # 既然你后续要修改网络架构，可以在修改网络时，将这里的缩放系数改成与你新网络最终 Stride 一致的值。
-        center = center / 8
-        
-        # 规范多目标数量输出为 3，确保 Batch Tensor 维度稳定
+        # 直接返回外界绝对像素坐标系下的绝对中心点 (相对于图像中心点的偏移量)
+        center = center - np.array(img_bin.shape[:2])[np.newaxis, ::-1] / 2 + 0.5
+
+        # 规范多目标数量输出为 3，确保 Batch 稳定
         if center.shape[0] < 3:
             pad = np.zeros((3 - center.shape[0], 2))
             center = np.concatenate([center, pad], axis=0)
