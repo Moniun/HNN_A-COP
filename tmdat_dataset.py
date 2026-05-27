@@ -78,7 +78,7 @@ class TurningDiskDataset(Dataset):
         if len(valid_idx) == 0:
             return np.zeros((3, 2))  # 防御边界：返回 3 个目标的全零占位
             
-        contours = np.asarray(contours, dtype=object)[valid_idx]
+        contours = [contours[i] for i in valid_idx]
 
         x, y, w, h = np.array([cv2.boundingRect(cnt) for cnt in contours]).T
         xc, yc = x + w / 2, y + h / 2

@@ -54,7 +54,8 @@ def test_siamfc():
     net = TurningDiskSiamFC().cuda()
     if load_ckpt_path:
         net.load_state_dict(torch.load(load_ckpt_path, map_location=torch.device("cuda:0")))
-    train_data = DataLoader(TurningDiskDataset(test=True), batch_size=1, pin_memory=True, shuffle=False)
+    
+    train_data = DataLoader(TurningDiskDataset(test=False), batch_size=1, pin_memory=True, shuffle=False)
     video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (640, 320)) # 天眸c原生分辨率
 
     for step, data in enumerate(train_data):
@@ -66,14 +67,23 @@ def test_siamfc():
         cop = cop.squeeze().data.cpu().numpy().astype(np.uint8)
         
         # 可视化SD事件（取正极性通道）
-        sd_vis = sd.squeeze()[0].data.cpu().numpy().astype(np.uint8)
+        # sd_vis = sd.squeeze()[0].data.cpu().numpy().astype(np.uint8)
+
+        # ---------- 替换原来的 sd_vis 和画图逻辑 ----------
+        
+        # 💡 修复点 1：提取SD信号时先取绝对值，并用 >0.5 过滤掉底层暗噪声，防止负数变成 255
+        sd_np = sd.squeeze()[0].data.cpu().numpy()
+        sd_vis = (np.abs(sd_np) > 0.5).astype(np.uint8)
 
         for t in range(gt_loc.shape[2]):
             plt.gca().clear()
-            img = cv2.cvtColor(cop.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)  # 转换为BGR用于OpenCV
-            # 在图像上叠加COP帧和SD事件
-            sd_resized = cv2.resize(sd_vis[..., t], (640, 320))
-            img[sd_resized != 0, 2] = 255  # 红色标记事件
+            img = cop.transpose(1, 2, 0).copy() 
+            
+            # 💡 修复点 2：事件流插值必须使用 INTER_NEAREST（最近邻），否则脉冲会被糊成一团
+            sd_resized = cv2.resize(sd_vis[..., t], (640, 320), interpolation=cv2.INTER_NEAREST)
+            
+            # 此时再用大于 0 作为掩码去上红色，就只会点亮真正的运动边缘了
+            img[sd_resized > 0, 2] = 255  
             
             for o in range(gt_loc.shape[0]):
                 px, py = pred_loc[o, :, t]
@@ -84,6 +94,7 @@ def test_siamfc():
             plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             plt.pause(0.1)
             video.write(img)
+        # ------------------------------------------------
     video.release()
 
 
