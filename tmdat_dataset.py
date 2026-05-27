@@ -6,6 +6,7 @@ from torch.utils.data import Dataset
 
 # 导入天眸c官方提供的解码与数据读取模块
 from tianmoucv.data.tianmoucData import TianmoucDataReader
+from tianmoucv.proc.denoise import denoise_defualt_args
 
 
 class TurningDiskDataset(Dataset):
@@ -20,6 +21,9 @@ class TurningDiskDataset(Dataset):
             self.frames = np.load(abspath("tianmouc_data/test_cop_frame.npy"))
             self.td_events = np.load(abspath("tianmouc_data/test_aop_td.npy"))
             self.sd_events = np.load(abspath("tianmouc_data/test_aop_sd.npy"))
+
+        if len(self.frames.shape) == 4 and self.frames.shape[-1] == 3:
+            self.frames = self.frames.transpose(0, 3, 1, 2)
 
     def __len__(self):
         return self.frames.shape[0]
@@ -49,6 +53,8 @@ class TurningDiskDataset(Dataset):
         自适应输入图像尺寸的多目标质心标签自动提取算法
         """
         if isFrame:
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
             # 天眸c 官方默认输出为 3 通道 RGB，需先转为单通道灰度图再做二值化
             if len(img.shape) == 3 and img.shape[2] == 3:
                 gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -123,8 +129,9 @@ def tmdat_2_numpy(tmdat_dir, output_dir="tianmouc_data", target_ts=None):
     """
     os.makedirs(output_dir, exist_ok=True)
     
+    d_args = denoise_defualt_args()
     # 实例化官方 DataReader，内部自动挂载 C++ 编写的 rod_decoder 并进行降噪
-    reader = TianmoucDataReader(path=tmdat_dir, N=1, aop_denoise=True, training=True, use_data_parser=False)
+    reader = TianmoucDataReader(path=tmdat_dir, N=1, aop_denoise=True, aop_denoise_args=d_args, training=True, use_data_parser=False)
     
     frames_data = []
     td_data = []
@@ -138,7 +145,13 @@ def tmdat_2_numpy(tmdat_dir, output_dir="tianmouc_data", target_ts=None):
             
         # 1. 处理 COP 认知图像帧 -> 直接保留官方原始输出的 [3, 320, 640] 形状，不进行任何 Resize
         cop_tensor = sample['F0'] 
-        frames_data.append(cop_tensor.numpy()) # [3, 320, 640]
+        cop_np = cop_tensor.numpy()
+        
+        if cop_np.shape[-1] == 3:
+            cop_np = cop_np.transpose(2, 0, 1)
+            
+        frames_data.append(cop_np)
+        # frames_data.append(cop_tensor.numpy()) # [3, 320, 640]
         
         # 2. 处理 AOP 差分脉冲时空流 -> 官方默认输出原始形状为 [3, itter, 160, 160]
         raw_aop = sample['rawDiff'].numpy() 
@@ -170,7 +183,7 @@ def abspath(path):
 
 
 if __name__ == "__main__":
-    tmdat_data_root = abspath("raw_tmdat_dataset")
+    tmdat_data_root = abspath("tianmouc_data")
     
     # 💡 使用方法说明：
     # 1. 若你想【100%自动保留硬件原始切片个数】，将 target_ts 设为 None 即可：

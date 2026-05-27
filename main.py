@@ -50,9 +50,10 @@ def train_siamfc():
 
 
 def test_siamfc():
-    load_ckpt_path = "ckpt/TurningDiskSiamFC_snn.ckpt"
+    load_ckpt_path = ""  # 设为空跳过预训练权重加载，使用随机初始化
     net = TurningDiskSiamFC().cuda()
-    net.load_state_dict(torch.load(load_ckpt_path, map_location=torch.device("cuda:0")))
+    if load_ckpt_path:
+        net.load_state_dict(torch.load(load_ckpt_path, map_location=torch.device("cuda:0")))
     train_data = DataLoader(TurningDiskDataset(test=True), batch_size=1, pin_memory=True, shuffle=False)
     video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (640, 320)) # 天眸c原生分辨率
 
