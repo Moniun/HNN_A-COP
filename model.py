@@ -157,16 +157,25 @@ class TurningDiskSiamFC(torch.nn.Module):
         # 通道维度相加融合
         dvs_feature = (sd_feature + td_feature) / 2
         
+        # 💡 终极修复：将 COP 大图的绝对像素坐标，动态无损压缩至特征图网格坐标
+        feat_cop_loc = cop_loc.clone()
+        # X轴映射：将 640 像素尺度的偏移缩放到特征图宽 (约80) 的尺度
+        feat_cop_loc[..., 0] *= (cop_feature.shape[3] / cop.shape[3]) 
+        # Y轴映射：将 320 像素尺度的偏移缩放到特征图高 (约40) 的尺度
+        feat_cop_loc[..., 1] *= (cop_feature.shape[2] / cop.shape[2]) 
+
+        # 使用动态缩放后的坐标进行目标模板(Kernel)提取
+        kernel = self.extract_clip(cop_feature, feat_cop_loc, (3, 3))
+        
         # 相关层密集匹配
-        kernel = self.extract_clip(cop_feature, cop_loc, (3, 3))
         cm = torch.stack([self.corr_up(dvs_feature[..., t], kernel) for t in range(ts)], -1)
 
         if training:
             l_reg = 0.1
-            # 💡 核心修复：将AOP绝对像素位移(target_loc)动态等比压缩到当前特征图网格(cm.shape)尺度
+            # 将AOP绝对像素位移(target_loc)动态等比压缩到当前特征图网格(cm.shape)尺度
             grid_target_loc = target_loc.clone()
-            grid_target_loc[..., 0] *= (cm.shape[3] / 160.0) # X轴映射：160像素对应w个网格
-            grid_target_loc[..., 1] *= (cm.shape[2] / 160.0) # Y轴映射：160像素对应h个网格
+            grid_target_loc[..., 0] *= (cm.shape[3] / 160.0) 
+            grid_target_loc[..., 1] *= (cm.shape[2] / 160.0) 
             
             gt_cm = self.gen_gt_cm(grid_target_loc, cm.shape[2:4])
             loss = - (gt_cm * cm).sum(dim=(2, 3)) + l_reg * torch.pow(cm * (gt_cm != 0), 2).sum(dim=(2, 3))
@@ -176,7 +185,7 @@ class TurningDiskSiamFC(torch.nn.Module):
             # 测试模式下，调用自适应还原算子生成 pred_loc
             pred_loc = self.get_target_loc(cm, cop.shape[-2:][::-1])
             
-            # 💡 核心修复：由于Dataset已经去掉了 /8，target_loc已经是原生AOP(160x160)下的像素偏移量
+            # 真实框标签各向异性空间重映射
             cop_offset_x = target_loc[..., 0] * (640.0 / 160.0)  # 水平方向放大 4 倍
             cop_offset_y = target_loc[..., 1] * (320.0 / 160.0)  # 垂直方向放大 2 倍
             cop_offset = torch.stack([cop_offset_x, cop_offset_y], dim=-2)
@@ -185,4 +194,3 @@ class TurningDiskSiamFC(torch.nn.Module):
             gt_loc_output = cop_offset + cop_center
             
             return {"cm": cm, "pred_loc": pred_loc, "cop": cop, "sd": sd, "td": td, "gt_loc": gt_loc_output}
-            
