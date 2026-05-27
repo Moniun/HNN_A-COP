@@ -64,37 +64,41 @@ def test_siamfc():
 
         pred_loc = net_out['pred_loc'].squeeze().data.cpu().numpy().astype(np.int64)
         gt_loc = net_out['gt_loc'].squeeze().data.cpu().numpy().astype(np.int64)
+        
+        # 将张量恢复成图片矩阵 [3, 320, 640]
         cop = cop.squeeze().data.cpu().numpy().astype(np.uint8)
         
-        # 可视化SD事件（取正极性通道）
-        # sd_vis = sd.squeeze()[0].data.cpu().numpy().astype(np.uint8)
-
-        # ---------- 替换原来的 sd_vis 和画图逻辑 ----------
-        
-        # 💡 修复点 1：提取SD信号时先取绝对值，并用 >0.5 过滤掉底层暗噪声，防止负数变成 255
-        sd_np = sd.squeeze()[0].data.cpu().numpy()
-        sd_vis = (np.abs(sd_np) > 0.5).astype(np.uint8)
+        # 提取经过源头过滤后的纯净 SD 脉冲（判断非零即可）
+        sd_vis = (sd.squeeze()[0].data.cpu().numpy() != 0).astype(np.uint8)
 
         for t in range(gt_loc.shape[2]):
             plt.gca().clear()
-            img = cop.transpose(1, 2, 0).copy() 
             
-            # 💡 修复点 2：事件流插值必须使用 INTER_NEAREST（最近邻），否则脉冲会被糊成一团
+            # 🚀 治本规范 1：模型出来的是标准 RGB，但 OpenCV 的所有操作（画框、存视频）必须使用 BGR！
+            # 我们在这里执行最正统的转换，彻底消灭“大红布”
+            img = cv2.cvtColor(cop.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
+            
+            # 使用最近邻插值放大脉冲图，保持像素锐利
             sd_resized = cv2.resize(sd_vis[..., t], (640, 320), interpolation=cv2.INTER_NEAREST)
             
-            # 此时再用大于 0 作为掩码去上红色，就只会点亮真正的运动边缘了
+            # 🚀 治本规范 2：在正统的 BGR 图像中，通道 2 代表真正的红色（Red）
+            # 此时这里赋予 255，就是极其干净的红色事件线条
             img[sd_resized > 0, 2] = 255  
             
             for o in range(gt_loc.shape[0]):
                 px, py = pred_loc[o, :, t]
                 gx, gy = gt_loc[o, :, t]
-                img = cv2.rectangle(img, (px-10, py-10), (px+10, py+10), (0, 0, 255), 1)  # 红色预测框
-                img = cv2.rectangle(img, (gx-10, gy-10), (gx+10, gy+10), (0, 255, 0), 1)  # 绿色真实框
+                # 标准 BGR 下，(0,0,255) 是纯红预测框，(0,255,0) 是纯绿真值框，物理逻辑完全对齐
+                img = cv2.rectangle(img, (px-10, py-10), (px+10, py+10), (0, 0, 255), 1)  
+                img = cv2.rectangle(img, (gx-10, gy-10), (gx+10, gy+10), (0, 255, 0), 1)  
 
+            # 供 matplotlib 视窗正常预览（imshow 期待 RGB）
             plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             plt.pause(0.1)
+            
+            # 🚀 治本规范 3：video.write 接收正统的 BGR 图像，保存出来的 MP4 视频色彩绝对 100% 还原真实自然色彩！
             video.write(img)
-        # ------------------------------------------------
+
     video.release()
 
 
