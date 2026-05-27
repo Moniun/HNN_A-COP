@@ -54,7 +54,7 @@ def test_siamfc():
     net = TurningDiskSiamFC().cuda()
     net.load_state_dict(torch.load(load_ckpt_path, map_location=torch.device("cuda:0")))
     train_data = DataLoader(TurningDiskDataset(test=True), batch_size=1, pin_memory=True, shuffle=False)
-    video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (320, 640))  # 天眸c原生分辨率
+    video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (640, 320)) # 天眸c原生分辨率
 
     for step, data in enumerate(train_data):
         cop, td, sd, cop_loc, target_loc = data

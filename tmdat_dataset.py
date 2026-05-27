@@ -84,9 +84,6 @@ class TurningDiskDataset(Dataset):
 
         # 归一化中心坐标 (完全依据当前 img_bin 的物理长宽自适应)
         center = center - np.array(img_bin.shape[:2])[np.newaxis, ::-1] / 2 + 0.5
-        
-        # 直接返回外界绝对像素坐标系下的绝对中心点 (相对于图像中心点的偏移量)
-        center = center - np.array(img_bin.shape[:2])[np.newaxis, ::-1] / 2 + 0.5
 
         # 规范多目标数量输出为 3，确保 Batch 稳定
         if center.shape[0] < 3:
