@@ -56,7 +56,7 @@ def test_siamfc():
         net.load_state_dict(torch.load(load_ckpt_path, map_location=torch.device("cuda:0")))
     
     train_data = DataLoader(TurningDiskDataset(test=False), batch_size=1, pin_memory=True, shuffle=False)
-    video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'DIVX'), 15, (640, 320)) # 天眸c原生分辨率
+    video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 15, (640, 320)) 
 
     for step, data in enumerate(train_data):
         cop, td, sd, cop_loc, target_loc = data
@@ -65,42 +65,44 @@ def test_siamfc():
         pred_loc = net_out['pred_loc'].squeeze().data.cpu().numpy().astype(np.int64)
         gt_loc = net_out['gt_loc'].squeeze().data.cpu().numpy().astype(np.int64)
         
-        # 将张量恢复成图片矩阵 [3, 320, 640]
-        cop = cop.squeeze().data.cpu().numpy().astype(np.uint8)
+        # 1. 🚀 核心修复：安全恢复认知底图的像素范围
+        cop_np = cop.squeeze().data.cpu().numpy() # [3, 320, 640]
         
-        # 提取经过源头过滤后的纯净 SD 脉冲（判断非零即可）
-        sd_vis = (sd.squeeze()[0].data.cpu().numpy() != 0).astype(np.uint8)
+        # 如果模型输出或 Dataset 读取出来的数值最大值小于等于 1.0，说明是浮点格式，必须乘以 255 还原！
+        if cop_np.max() <= 1.01:
+            cop_np = cop_np * 255.0
+            
+        cop_np = np.clip(cop_np, 0, 255).astype(np.uint8)
+        
+        # 严格转置并转换为 OpenCV 标准的 BGR 空间（此时白色背景将真正回归为正常的白色）
+        base_img = cv2.cvtColor(cop_np.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
 
         for t in range(gt_loc.shape[2]):
             plt.gca().clear()
             
-            # 🚀 治本规范 1：模型出来的是标准 RGB，但 OpenCV 的所有操作（画框、存视频）必须使用 BGR！
-            # 我们在这里执行最正统的转换，彻底消灭“大红布”
-            img = cv2.cvtColor(cop.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
+            # 克隆底图，防止帧与帧之间互相污染
+            img = base_img.copy()
             
-            # 使用最近邻插值放大脉冲图，保持像素锐利
-            sd_resized = cv2.resize(sd_vis[..., t], (640, 320), interpolation=cv2.INTER_NEAREST)
-            
-            # 🚀 治本规范 2：在正统的 BGR 图像中，通道 2 代表真正的红色（Red）
-            # 此时这里赋予 255，就是极其干净的红色事件线条
-            img[sd_resized > 0, 2] = 255  
-            
+            # 3. 绘制目标框（确保坐标在 640x320 画布内部）
             for o in range(gt_loc.shape[0]):
                 px, py = pred_loc[o, :, t]
                 gx, gy = gt_loc[o, :, t]
-                # 标准 BGR 下，(0,0,255) 是纯红预测框，(0,255,0) 是纯绿真值框，物理逻辑完全对齐
-                img = cv2.rectangle(img, (px-10, py-10), (px+10, py+10), (0, 0, 255), 1)  
-                img = cv2.rectangle(img, (gx-10, gy-10), (gx+10, gy+10), (0, 255, 0), 1)  
+                
+                px, gx = np.clip([px, gx], 0, 640 - 1)
+                py, gy = np.clip([py, gy], 0, 320 - 1)
+                
+                # 绘制标准的红色预测框 (0, 0, 255) 和绿色真值框 (0, 255, 0)
+                img = cv2.rectangle(img, (int(px)-10, int(py)-10), (int(px)+10, int(py)+10), (0, 0, 255), 2)  
+                img = cv2.rectangle(img, (int(gx)-10, int(gy)-10), (int(gx)+10, int(gy)+10), (0, 255, 0), 2)  
 
-            # 供 matplotlib 视窗正常预览（imshow 期待 RGB）
+            # 供 matplotlib 正常预览
             plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            plt.pause(0.1)
+            plt.pause(0.01)
             
-            # 🚀 治本规范 3：video.write 接收正统的 BGR 图像，保存出来的 MP4 视频色彩绝对 100% 还原真实自然色彩！
+            # 写入视频
             video.write(img)
 
     video.release()
-
 
 if __name__ == "__main__":
     # train_siamfc()

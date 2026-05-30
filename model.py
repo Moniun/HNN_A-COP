@@ -183,14 +183,18 @@ class TurningDiskSiamFC(torch.nn.Module):
             return {"loss": loss, "cm": cm}
         else:
             # 测试模式下，调用自适应还原算子生成 pred_loc
-            pred_loc = self.get_target_loc(cm, cop.shape[-2:][::-1])
+            # cop 形状为 [Batch, 3, H, W]，准确提取其实际 H 和 W
+            img_h, img_w = cop.shape[-2], cop.shape[-1]
+            pred_loc = self.get_target_loc(cm, (img_w, img_h))
             
-            # 真实框标签各向异性空间重映射
-            cop_offset_x = target_loc[..., 0] * (640.0 / 160.0)  # 水平方向放大 4 倍
-            cop_offset_y = target_loc[..., 1] * (320.0 / 160.0)  # 垂直方向放大 2 倍
+            # 💡 动态、非对称空间重映射真实框标签，彻底杜绝 640/320 硬编码导致的坐标轴错位
+            cop_offset_x = target_loc[..., 0] * (float(img_w) / 160.0)  # 依据认知帧实际宽度等比缩放
+            cop_offset_y = target_loc[..., 1] * (float(img_h) / 160.0)  # 依据认知帧实际高度等比缩放
             cop_offset = torch.stack([cop_offset_x, cop_offset_y], dim=-2)
             
-            cop_center = torch.tensor(cop.shape[-2:][::-1]).view(1, 1, 2, 1).to(target_loc.device) / 2 - 0.5
+            # 计算画布中心中心点偏置
+            cop_center = torch.tensor([img_w, img_h]).view(1, 1, 2, 1).to(target_loc.device) / 2 - 0.5
             gt_loc_output = cop_offset + cop_center
             
             return {"cm": cm, "pred_loc": pred_loc, "cop": cop, "sd": sd, "td": td, "gt_loc": gt_loc_output}
+            
