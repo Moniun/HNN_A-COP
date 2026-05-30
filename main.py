@@ -1,4 +1,4 @@
-from tmdat_dataset import TurningDiskDataset
+from tmdat_dataset import TianmoucStreamingDataset
 from models import TianmoucHNNBackbone, DetectionHead, FullModel
 import numpy as np
 import torch
@@ -35,7 +35,7 @@ def train_siamfc():
     scheduler = MultiStepLR(optimizer, milestones=[400], gamma=0.1)
     criterion = nn.MSELoss()
     
-    train_data = DataLoader(TurningDiskDataset(), batch_size=32, shuffle=True, num_workers=8)
+    train_data = DataLoader(TianmoucStreamingDataset(test=False), batch_size=32, shuffle=True, num_workers=8)
     
     for epoch in tqdm(range(epoch_num)):
         for step, data in enumerate(train_data):
@@ -90,10 +90,10 @@ def test_siamfc():
         backbone.load_state_dict(state_dict.get('backbone', {}), strict=False)
         task_head.load_state_dict(state_dict.get('head', {}), strict=False)
     
-    train_data = DataLoader(TurningDiskDataset(test=False), batch_size=1, pin_memory=True, shuffle=False)
+    test_data = DataLoader(TianmoucStreamingDataset(test=True), batch_size=1, pin_memory=True, shuffle=False)
     video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 15, (640, 320)) 
 
-    for step, data in enumerate(train_data):
+    for step, data in enumerate(test_data):
         cop, td, sd, cop_loc, target_loc = data
         cop = cop.cuda()
         td = td.cuda()

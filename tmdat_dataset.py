@@ -3,25 +3,30 @@ import numpy as np
 import cv2
 import torch
 from torch.utils.data import Dataset
-
-# 导入天眸c官方提供的解码与数据读取模块
 from tianmoucv.data.tianmoucData import TianmoucDataReader
 from tianmoucv.proc.denoise import denoise_defualt_args
 
 
-class TurningDiskDataset(Dataset):
-    def __init__(self, test=False) -> None:
+class TianmoucStreamingDataset(Dataset):
+    """
+    通用天眸芯流式感知数据集
+    去除了转盘追踪任务的硬编码逻辑，纯粹作为通用的分布式多模态特征与时序全量标签的供给器
+    """
+    def __init__(self, test=False, data_dir="tianmouc_data") -> None:
         super().__init__()
-        # 预处理后保存的天眸c原生高保真 numpy 矩阵路径
-        if not test:
-            self.frames = np.load(abspath("tianmouc_data/cop_frame.npy"))     # 原生静态认知帧 [N, 3, 320, 640]
-            self.td_events = np.load(abspath("tianmouc_data/aop_td.npy"))   # 原生时间差分流 [N, 1, 160, 160, T]
-            self.sd_events = np.load(abspath("tianmouc_data/aop_sd.npy"))   # 原生空间差分流 [N, 2, 160, 160, T]
-        else:
-            self.frames = np.load(abspath("tianmouc_data/test_cop_frame.npy"))
-            self.td_events = np.load(abspath("tianmouc_data/test_aop_td.npy"))
-            self.sd_events = np.load(abspath("tianmouc_data/test_aop_sd.npy"))
+        self.data_dir = data_dir
+        self.is_test = test
+        prefix = "test_" if test else ""
+        
+        # 数据存放在 proc_npy 子文件夹下
+        proc_dir = os.path.join(data_dir, "proc_npy")
+        
+        # 1. 载入离线持久化好的高保真 numpy 矩阵
+        self.frames = np.load(abspath(f"{proc_dir}/{prefix}cop_frame.npy"))     # 静态认知帧 [N, 3, 320, 640]
+        self.td_events = np.load(abspath(f"{proc_dir}/{prefix}aop_td.npy"))   # 时间差分流 [N, 1, 160, 160, T]
+        self.sd_events = np.load(abspath(f"{proc_dir}/{prefix}aop_sd.npy"))   # 空间差分流 [N, 2, 160, 160, T]
 
+        # 确保通道轴在第 1 维 [B, C, H, W]
         if len(self.frames.shape) == 4 and self.frames.shape[-1] == 3:
             self.frames = self.frames.transpose(0, 3, 1, 2)
 
@@ -29,153 +34,97 @@ class TurningDiskDataset(Dataset):
         return self.frames.shape[0]
     
     def __getitem__(self, item):
-        cop = self.frames[item]       # 形状: [3, 320, 640] (天眸c原生RGB分辨率)
-        td = self.td_events[item]     # 形状: [1, 160, 160, T] (天眸c原生AOP分辨率)
-        sd = self.sd_events[item]     # 形状: [2, 160, 160, T] (天眸c原生AOP分辨率)
+        cop = self.frames[item]       
+        td = self.td_events[item]     
+        sd = self.sd_events[item]     
+        T_steps = td.shape[-1]
         
-        # 1. 提取COP帧中的多目标位置真值标签 [Num_Objects, 2]
-        # 传入 get_target 的图像形状转换为 [H, W, C] 以匹配 OpenCV 接口
-        cop_loc = self.get_target(cop.transpose(1, 2, 0), isFrame=True)
+        target_loc = self.load_generic_sequence_labels(item, T_steps, test=self.is_test)
         
-        # 2. 逐时间步提取TD事件中的多目标运动轨迹真值 [Num_Objects, 2, T]
-        # get_target 内部会自适应 td 此时的 [160, 160] 尺寸进行质心归一化
-        target_loc = np.stack([
-            self.get_target(td[:, ..., t].transpose(1, 2, 0), isFrame=False) 
-            for t in range(td.shape[-1])
-        ], -1)
-        
-        # 【完美对接网络接口】返回5个元素，其空间长宽和时间步完全保持原生或叠加后的状态
+        cop_loc = target_loc[..., 0] 
         return cop, td, sd, cop_loc, target_loc
 
-    @staticmethod
-    def get_target(img, isFrame=True):
+    def load_generic_sequence_labels(self, item, T_steps, test=False):
         """
-        自适应输入图像尺寸的多目标质心标签自动提取算法
+        根据 test 状态，自动去对应的文件夹读取训练标签或测试标签
         """
-        if isFrame:
-            if img.dtype != np.uint8:
-                img = img.astype(np.uint8)
-            # 天眸c 官方默认输出为 3 通道 RGB，需先转为单通道灰度图再做二值化
-            if len(img.shape) == 3 and img.shape[2] == 3:
-                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = img
-            img_bin = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY)[1].astype(np.uint8)
+        prefix = "test_" if test else ""
+        
+        label_path = abspath(f"{self.data_dir}/labels/{prefix}{item}.npy")
+        
+        if os.path.exists(label_path):
+            return np.load(label_path)
         else:
-            # 脉冲流输入：若有多通道（如SDL/SDR）则取最大绝对值压缩为 2D 轮廓
-            if len(img.shape) == 3:
-                img_2d = np.max(np.abs(img), axis=2)
-            else:
-                img_2d = np.abs(img)
-            img_bin = (img_2d > 0).astype(np.uint8)
-
-        contours, hierarchy = cv2.findContours(img_bin, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        
-        area_sort = np.argsort([cv2.contourArea(c) for c in contours])
-        area_sort = area_sort[-2:-5:-1] if isFrame else area_sort[:-4:-1]
-        
-        valid_idx = [i for i in area_sort if i < len(contours)]
-        if len(valid_idx) == 0:
-            return np.zeros((3, 2))  # 防御边界：返回 3 个目标的全零占位
-            
-        contours = [contours[i] for i in valid_idx]
-
-        x, y, w, h = np.array([cv2.boundingRect(cnt) for cnt in contours]).T
-        xc, yc = x + w / 2, y + h / 2
-        center = np.stack([xc, yc], -1)
-        
-        # 自适应当前输入的宽和高进行质心排序
-        r = ((img_bin.shape[1] / 2 - xc) ** 2 + (img_bin.shape[0] / 2 - yc) ** 2) ** 0.5
-        center = center[np.argsort(r)]
-
-        # 归一化中心坐标 (完全依据当前 img_bin 的物理长宽自适应)
-        center = center - np.array(img_bin.shape[:2])[np.newaxis, ::-1] / 2 + 0.5
-
-        # 规范多目标数量输出为 3，确保 Batch 稳定
-        if center.shape[0] < 3:
-            pad = np.zeros((3 - center.shape[0], 2))
-            center = np.concatenate([center, pad], axis=0)
-        else:
-            center = center[:3, :]
-            
-        return center
+            return np.zeros((3, 2, T_steps), dtype=np.float32)
 
 
 def temporal_accumulate(data, target_ts):
     """
-    核心算子：将原始的 T 个时间步，通过时域邻域叠加（Sum），无损压缩为目标 target_ts 个时间步
+    流式核心算子：将芯片原生的 T_raw 个高频时间片，通过时域邻域滑窗叠加（Sum），
+    智能无损压缩为你人为指定的 target_ts 个前向传播时间微步。
     输入 data 形状: [Channel, Time, Height, Width]
     """
     C, T, H, W = data.shape
     if target_ts is None or target_ts == T:
         return data
     
-    # 利用 np.array_split 智能应对无法整除的情况（例如 25 步切成 6 步）
     indices_groups = np.array_split(np.arange(T), target_ts)
     accumulated_steps = []
     
     for group in indices_groups:
-        # 将属于当前时间窗口内的所有原始脉冲在时域上进行累加（Sum）
-        step_sum = np.sum(data[:, group, :, :], axis=1) # 消除组内时间轴 -> [Channel, Height, Width]
+        step_sum = np.sum(data[:, group, :, :], axis=1)
         accumulated_steps.append(step_sum)
         
-    # 重新在时间轴（dim=1）上拼接
-    return np.stack(accumulated_steps, axis=1) # 返回 [Channel, target_ts, Height, Width]
+    return np.stack(accumulated_steps, axis=1)
 
 
-def tmdat_2_numpy(tmdat_dir, output_dir="tianmouc_data", target_ts=None):
+def tmdat_2_numpy(tmdat_dir, output_dir="tianmouc_data", target_ts=None, is_test=False):
     """
-    离线读取原始 .tmdat 数据包，支持原生时间步保留或人为指定时间步叠加
-    """
-    os.makedirs(output_dir, exist_ok=True)
+    离线数据转换器：读取原始硬件压缩包 .tmdat 并导出为适配 HNN 独立通路的 Numpy 矩阵
     
+    参数:
+        tmdat_dir (str): 存放原始 .tmdat 文件的根目录
+        output_dir (str): 导出 .npy 特征阵列的根目录
+        target_ts (int): 目标时域对齐微步数。若为 None 则完全保留硬件原生高频切片数
+        is_test (bool): 是否为测试集。如果是 True，导出的文件名会自动带上 "test_" 前缀
+    """
+    # 数据导出到 proc_npy 子文件夹
+    proc_dir = os.path.join(output_dir, "proc_npy")
+    os.makedirs(proc_dir, exist_ok=True)
     d_args = denoise_defualt_args()
-    # 实例化官方 DataReader，内部自动挂载 C++ 编写的 rod_decoder 并进行降噪
+    
     reader = TianmoucDataReader(path=tmdat_dir, N=1, aop_denoise=True, aop_denoise_args=d_args, training=True, use_data_parser=False)
     
-    frames_data = []
-    td_data = []
-    sd_data = []
+    frames_data, td_data, sd_data = [], [], []
     
-    print(f"正在读取并解析 .tmdat 原始数据集，总样本数: {len(reader)} ...")
+    prefix = "test_" if is_test else ""
+    
+    print(f"开始解析原生天眸芯 {'【测试集】' if is_test else '【训练集】'} .tmdat 数据流，总片段数: {len(reader)}")
     for idx in range(len(reader)):
         sample = reader[idx]
         if sample is None:
             continue
             
-        # 1. 处理 COP 认知图像帧 -> 直接保留官方原始输出的 [3, 320, 640] 形状，不进行任何 Resize
         cop_tensor = sample['F0'] 
         cop_np = cop_tensor.numpy()
-        
         if cop_np.shape[-1] == 3:
             cop_np = cop_np.transpose(2, 0, 1)
-            
         frames_data.append(cop_np)
-        # frames_data.append(cop_tensor.numpy()) # [3, 320, 640]
         
-        # 2. 处理 AOP 差分脉冲时空流 -> 官方默认输出原始形状为 [3, itter, 160, 160]
         raw_aop = sample['rawDiff'].numpy() 
-        
-        # 💡 调用时域叠加机制：实现人为定义时间步数与内生时间步的完美兼容
         if target_ts is not None:
             raw_aop = temporal_accumulate(raw_aop, target_ts)
             
-        # 3. 通道剥离与流分流
-        td_raw = raw_aop[0:1, ...] # 时间差分 TD 形状: [1, T_fused, 160, 160]
-        sd_raw = raw_aop[1:3, ...] # 空间差分 SD 形状: [2, T_fused, 160, 160]
+        td_raw = raw_aop[0:1, ...]
+        sd_raw = raw_aop[1:3, ...]
         
-        # 4. 维度置换（Permute）：将时间轴 T 移到最后一维，完全适配你的双通路 SNN 输入标准
-        td_fused = td_raw.transpose(0, 2, 3, 1) # [1, 160, 160, T_fused]
-        sd_fused = sd_raw.transpose(0, 2, 3, 1) # [2, 160, 160, T_fused]
+        td_data.append(td_raw.transpose(0, 2, 3, 1))
+        sd_data.append(sd_raw.transpose(0, 2, 3, 1))
         
-        td_data.append(td_fused)
-        sd_data.append(sd_fused)
-        
-    # 执行全量持久化保存
-    np.save(os.path.join(output_dir, "cop_frame.npy"), np.array(frames_data, dtype=np.float32))
-    np.save(os.path.join(output_dir, "aop_td.npy"), np.array(td_data, dtype=np.float32))
-    np.save(os.path.join(output_dir, "aop_sd.npy"), np.array(sd_data, dtype=np.float32))
-    print(f"🎉 转换成功！已完全保留天眸c原始长宽。数据矩阵已导出至: {output_dir}")
+    np.save(os.path.join(proc_dir, f"{prefix}cop_frame.npy"), np.array(frames_data, dtype=np.float32))
+    np.save(os.path.join(proc_dir, f"{prefix}aop_td.npy"), np.array(td_data, dtype=np.float32))
+    np.save(os.path.join(proc_dir, f"{prefix}aop_sd.npy"), np.array(sd_data, dtype=np.float32))
+    print(f"转换完成！HNN 通路的独立特征已被固化导出至: {proc_dir}/{prefix}*.npy")
 
 
 def abspath(path):
@@ -183,11 +132,10 @@ def abspath(path):
 
 
 if __name__ == "__main__":
-    tmdat_data_root = abspath("tianmouc_data")
+    output_data_root = abspath("tianmouc_data")
     
-    # 💡 使用方法说明：
-    # 1. 若你想【100%自动保留硬件原始切片个数】，将 target_ts 设为 None 即可：
-    tmdat_2_numpy(tmdat_data_root, target_ts=None)
+    train_tmdat_dir = abspath("raw_tmdat/train") 
+    tmdat_2_numpy(train_tmdat_dir, output_dir=output_data_root, target_ts=None, is_test=False)
     
-    # 2. 若你想【人为指定切片个数】，比如强行压缩为 5 个时间步，系统会自动在内部进行时域邻域脉冲叠加：
-    # tmdat_2_numpy(tmdat_data_root, target_ts=5)
+    test_tmdat_dir = abspath("raw_tmdat/test") 
+    tmdat_2_numpy(test_tmdat_dir, output_dir=output_data_root, target_ts=None, is_test=True)
