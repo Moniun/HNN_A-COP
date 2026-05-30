@@ -127,11 +127,13 @@ class ResNet2StageSNN(nn.Module):
             layer.reset_state(history)
 
     def step(self, x):
-        self.layers(x)
-        out = self.layers[-1].state[0]
-        return out
+        """处理单步时间片的输入 x: [B, C, H, W]"""
+        out = self.layers(x) 
+        out_mem = self.layers[-1].state[0]
+        return out_mem
 
     def forward(self, net_in):
+        """保留原有 forward 方法以兼容旧有代码或批量预训练"""
         self.reset_state()
         out_list = []
         for t in range(net_in.shape[-1]):
