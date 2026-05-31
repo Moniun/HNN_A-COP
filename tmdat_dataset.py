@@ -55,6 +55,7 @@ class TianmoucStreamingDataset(Dataset):
         if os.path.exists(label_path):
             return np.load(label_path)
         else:
+            print(f"⚠️ Warning: Label file {label_path} not found! Returning zero placeholders.")
             return np.zeros((3, 2, T_steps), dtype=np.float32)
 
 
@@ -134,8 +135,11 @@ def abspath(path):
 if __name__ == "__main__":
     output_data_root = abspath("tianmouc_data")
     
-    train_tmdat_dir = abspath("raw_tmdat/train") 
-    tmdat_2_numpy(train_tmdat_dir, output_dir=output_data_root, target_ts=None, is_test=False)
+    # train_tmdat_dir = abspath("raw_tmdat/train") 
+    # tmdat_2_numpy(train_tmdat_dir, output_dir=output_data_root, target_ts=None, is_test=False)
     
-    test_tmdat_dir = abspath("raw_tmdat/test") 
-    tmdat_2_numpy(test_tmdat_dir, output_dir=output_data_root, target_ts=None, is_test=True)
+    # test_tmdat_dir = abspath("raw_tmdat/test") 
+    # tmdat_2_numpy(test_tmdat_dir, output_dir=output_data_root, target_ts=None, is_test=True)
+
+    train_tmdat_dir = abspath("/root/autodl-tmp/HNN_A-COP/tianmouc_data/driving_subset/NM_outdoor_cross_6") 
+    tmdat_2_numpy(train_tmdat_dir, output_dir=output_data_root, target_ts=None, is_test=False)

@@ -26,20 +26,29 @@ class TianmoucHNNBackbone(nn.Module):
         self.td_net.reset_state(history=False)
 
     def forward(self, rgb_frame, sd_slice, td_slice, is_rgb_available=True):
+        # 1. 前端网络特征提取：COP 产生 [37, 77]，AOP 产生 [17, 17]
         if is_rgb_available:
-            self.current_feature_map = self.cop_net.step(rgb_frame)
+            self.current_feature_map = self.cop_net.step(rgb_frame)  # [B, 512, 37, 77]
             
-        sd_feat = self.sd_net.step(sd_slice)
-        td_feat = self.td_net.step(td_slice)
+        sd_feat = self.sd_net.step(sd_slice)  # 原生 160x160 输入 -> 提取出 [B, 512, 17, 17]
+        td_feat = self.td_net.step(td_slice)  # 原生 160x160 输入 -> 提取出 [B, 512, 17, 17]
         
-        # 先使用一种简单高效的融合方式，后续进行优化
+        # 2. 混合单元接口（HUs）融合
         dvs_raw_fuse = (sd_feat + td_feat) / 2.0
-        feature_delta = self.hu_fuse(dvs_raw_fuse)
+        feature_delta = self.hu_fuse(dvs_raw_fuse)  # 保持低通道开销的 [B, 512, 17, 17]
         
         if self.current_feature_map is None:
-            self.current_feature_map = torch.zeros_like(feature_delta)
+            self.current_feature_map = torch.zeros((feature_delta.shape[0], 512, 37, 77), device=feature_delta.device)
             
-        self.current_feature_map = self.current_feature_map + feature_delta
+        # 3. 🚀 关键物理对齐：在得到特征后，再强行重采样对齐空间尺寸
+        # 完美复现 1个 AOP 像素格在全局画布上对应一个 2x4 密集 COP 像素块的物理本质！
+        feature_delta_aligned = F.interpolate(
+            feature_delta, 
+            size=(self.current_feature_map.shape[2], self.current_feature_map.shape[3]), 
+            mode='nearest'
+        )  # 规整至 [B, 512, 37, 77]
+        
+        self.current_feature_map = self.current_feature_map + feature_delta_aligned
         
         return self.current_feature_map
 

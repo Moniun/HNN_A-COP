@@ -14,9 +14,9 @@ from tqdm import tqdm
 import time
 
 
-def train_siamfc():
-    epoch_num = 800
-    save_period = 2
+def train():
+    epoch_num = 10
+    save_period = 1
     load_ckpt_path = ""
     save_ckpt_path = "ckpt/HNN_detection_head.ckpt"
     Path(os.path.dirname(save_ckpt_path)).mkdir(parents=True, exist_ok=True)
@@ -80,7 +80,7 @@ def train_siamfc():
             }, save_ckpt_path)
 
 
-def test_siamfc():
+def test():
     load_ckpt_path = ""
     backbone = TianmoucHNNBackbone().cuda()
     task_head = DetectionHead(in_channels=512, num_objects=3).cuda()
@@ -145,5 +145,5 @@ def test_siamfc():
 
 
 if __name__ == "__main__":
-    train_siamfc()
-    # test_siamfc()
+    train()
+    # test()
