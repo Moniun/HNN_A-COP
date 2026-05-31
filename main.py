@@ -1,5 +1,5 @@
-from tmdat_dataset import TianmoucStreamingDataset
-from models import TianmoucHNNBackbone, DetectionHead, FullModel
+from dataset.tmdat_dataset import TianmoucStreamingDataset
+from models import TianmoucHNNBackbone, TaskHead, FullModel
 import numpy as np
 import torch
 import torch.nn as nn
@@ -24,7 +24,7 @@ def train():
     writer = SummaryWriter('summary/train_predictor_{}'.format(int(time.time())))
     
     backbone = TianmoucHNNBackbone().cuda()
-    task_head = DetectionHead(in_channels=512, num_objects=3).cuda()
+    task_head = TaskHead(in_channels=512, num_objects=3).cuda()
     
     if load_ckpt_path:
         state_dict = torch.load(load_ckpt_path, map_location=torch.device("cuda:0"))
@@ -83,7 +83,7 @@ def train():
 def test():
     load_ckpt_path = ""
     backbone = TianmoucHNNBackbone().cuda()
-    task_head = DetectionHead(in_channels=512, num_objects=3).cuda()
+    task_head = TaskHead(in_channels=512, num_objects=3).cuda()
     
     if load_ckpt_path:
         state_dict = torch.load(load_ckpt_path, map_location=torch.device("cuda:0"))
