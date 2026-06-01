@@ -1,27 +1,54 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm  # 🚀 引入工业级大模型库
+import timm  
 from models.snn_model import ConvNeXt2StageSNN
+
+
+class SignalQualityGate(nn.Module):
+    """
+    🚀 信号质量自适应决策头：
+    动态评估 COP 大底图、SD 脉冲和 TD 脉冲的隐空间激活品质，输出自适应融合权重 (alpha + beta + gamma = 1)
+    """
+    def __init__(self, in_channels=384):
+        super().__init__()
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.mlp = nn.Sequential(
+            nn.Linear(in_channels * 3, 64, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 3, bias=False),
+            nn.Softmax(dim=-1) 
+        )
+
+    def forward(self, cop_feat, sd_feat, td_feat):
+        b, c, h, w = cop_feat.shape
+        w_cop = self.global_pool(cop_feat).view(b, -1)
+        w_sd = self.global_pool(sd_feat).view(b, -1)
+        w_td = self.global_pool(td_feat).view(b, -1)
+        
+        combined_stat = torch.cat([w_cop, w_sd, w_td], dim=1)
+        weights = self.mlp(combined_stat) 
+        
+        alpha = weights[:, 0:1].view(b, 1, 1, 1) 
+        beta  = weights[:, 1:2].view(b, 1, 1, 1) 
+        gamma = weights[:, 2:3].view(b, 1, 1, 1) 
+        return alpha, beta, gamma
 
 
 class TianmoucHNNBackbone(nn.Module):
     def __init__(self):
         super().__init__()
-        # 🚀 认知通路大升级：拉取 Meta 官方先进的预训练 ConvNeXt-Tiny
+        
         print("====== 正在加载 ConvNeXt-Tiny 预训练权重先验 ======")
         self.cop_net = timm.create_model('convnext_tiny', pretrained=True, features_only=True)
-        
-        # 💡 自监督核心策略：完全冻结大模型老师的权重，100% 迫使梯度用于雕刻 SNN 门控
         for param in self.cop_net.parameters():
             param.requires_grad = False
             
-        # 🚀 动作通路大升级：各向同性现代化 SNN 路径 (在 Stage 2 输出 384 通道物理膜电位)
         self.sd_net = ConvNeXt2StageSNN(inchannel=2, out_channels=384)
         self.td_net = ConvNeXt2StageSNN(inchannel=1, out_channels=384)
         
-        # 🚀 HUs 混合单元融合通道层：
-        # 完美接管两路 SNN 通道融合，1x1 变频卷积
+        self.quality_gate = SignalQualityGate(in_channels=384)
+        
         self.hu_fuse = nn.Sequential(
             nn.Conv2d(384, 384, kernel_size=1, bias=False), 
             nn.BatchNorm2d(384),
@@ -35,7 +62,6 @@ class TianmoucHNNBackbone(nn.Module):
         self.td_net.reset_state(history=False)
 
     def get_oracle_rgb_feature(self, current_rgb_frame):
-        """教师特征接口：ConvNeXt 的 feats[2] 对应 Stage 2 输出 [B, 384, 20, 40]"""
         with torch.no_grad(): 
             feats = self.cop_net(current_rgb_frame)
             oracle_feat = feats[2]
@@ -43,33 +69,28 @@ class TianmoucHNNBackbone(nn.Module):
 
     def forward(self, rgb_frame, sd_slice, td_slice, is_rgb_available=True):
         if is_rgb_available:
-            # 快门触发点：刷新长期语义大底图 [B, 384, 20, 40]
+            # 💡 当初始时刻传入了携带出隧道强光噪声的图像时，此处提取的底图特征将包含干扰伪影
             feats = self.cop_net(rgb_frame)
             self.current_feature_map = feats[2].clone()  
             
-        # 推进现代化脉冲大核 SNN 分支演进，吐出原生的 [B, 384, 20, 20] 状态电位图
         sd_feat = self.sd_net.step(sd_slice)  
         td_feat = self.td_net.step(td_slice)  
         
-        # HUs 核心融合逻辑：动作通路（DVS）多维脉冲残差融汇交互
-        dvs_raw_fuse = (sd_feat + td_feat) / 2.0
-        feature_delta = self.hu_fuse(dvs_raw_fuse)  # [B, 384, 20, 20]
-        
         if self.current_feature_map is None:
-            self.current_feature_map = torch.zeros((feature_delta.shape[0], 384, 20, 40), device=feature_delta.device)
+            self.current_feature_map = torch.zeros((sd_feat.shape[0], 384, 20, 40), device=sd_feat.device)
             
-        # 🚀 HUs 空间对齐：AOP 的 20x20 特征网格，通过 1:2 等比例插值，无损、不畸变地平铺到 20x40 Canvas 上！
-        # 1个AOP残差格子横向严格对应2个COP语义格子，展现极高的科学可解释性
-        feature_delta_aligned = F.interpolate(
-            feature_delta, 
-            size=(self.current_feature_map.shape[2], self.current_feature_map.shape[3]), 
-            mode='nearest'
-        )  
+        sd_feat_aligned = F.interpolate(sd_feat, size=(20, 40), mode='nearest')
+        td_feat_aligned = F.interpolate(td_feat, size=(20, 40), mode='nearest')
         
-        # HUs 流式画布累加更新
-        self.current_feature_map = self.current_feature_map + feature_delta_aligned
+        # 实时根据主路隐空间的激活状态解算互补权重系数
+        alpha, beta, gamma = self.quality_gate(self.current_feature_map, sd_feat_aligned, td_feat_aligned)
         
-        # 直接对外吐出最干净的 384 通道特征图，杜绝任何硬编码扭曲拉伸
+        # 🔒 当 alpha (COP认知图权重) 因为突发强光噪声被自适应扣减压低时，
+        # 系统将重兵全部压在 beta 和 gamma 上，驱动不受强光饱和影响的空间差分脉冲流完成完美的无模糊特征纠偏外推！
+        dvs_weighted_fuse = beta * sd_feat_aligned + gamma * td_feat_aligned
+        feature_delta = self.hu_fuse(dvs_weighted_fuse)
+        
+        self.current_feature_map = alpha * self.current_feature_map + feature_delta
         return self.current_feature_map
 
 
