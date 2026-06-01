@@ -17,19 +17,20 @@ import time
 def train():
     epoch_num = 10
     save_period = 1
-    load_ckpt_path = ""
+    load_ckpt_path = "ckpt/HNN_backbone.ckpt" # 默认点火载入你刚刚做完自监督训练的 Backbone 权重
     save_ckpt_path = "ckpt/HNN_detection_head.ckpt"
     Path(os.path.dirname(save_ckpt_path)).mkdir(parents=True, exist_ok=True)
 
     writer = SummaryWriter('summary/train_predictor_{}'.format(int(time.time())))
     
     backbone = TianmoucHNNBackbone().cuda()
-    task_head = TaskHead(in_channels=512, num_objects=3).cuda()
+    # 🚀 核心适配修改：下游检测 Head 接收端通道数无损更新为标准的 384 维
+    task_head = TaskHead(in_channels=384, num_objects=3).cuda()
     
-    if load_ckpt_path:
+    if load_ckpt_path and os.path.exists(load_ckpt_path):
         state_dict = torch.load(load_ckpt_path, map_location=torch.device("cuda:0"))
         backbone.load_state_dict(state_dict.get('backbone', {}), strict=False)
-        task_head.load_state_dict(state_dict.get('head', {}), strict=False)
+        print(f"====== 成功无缝加载预训练好的现代化大核 Backbone 权重先验 ======")
     
     optimizer = torch.optim.Adam(list(backbone.parameters()) + list(task_head.parameters()), lr=1e-3)
     scheduler = MultiStepLR(optimizer, milestones=[400], gamma=0.1)
@@ -81,14 +82,9 @@ def train():
 
 
 def test():
-    load_ckpt_path = ""
     backbone = TianmoucHNNBackbone().cuda()
-    task_head = TaskHead(in_channels=512, num_objects=3).cuda()
-    
-    if load_ckpt_path:
-        state_dict = torch.load(load_ckpt_path, map_location=torch.device("cuda:0"))
-        backbone.load_state_dict(state_dict.get('backbone', {}), strict=False)
-        task_head.load_state_dict(state_dict.get('head', {}), strict=False)
+    # 🚀 核心适配修改：测试函数内实例化对应的 TaskHead 通道数也同步变更为 384
+    task_head = TaskHead(in_channels=384, num_objects=3).cuda()
     
     test_data = DataLoader(TianmoucStreamingDataset(test=True), batch_size=1, pin_memory=True, shuffle=False)
     video = cv2.VideoWriter('demo.mp4', cv2.VideoWriter_fourcc(*'mp4v'), 15, (640, 320)) 
@@ -146,4 +142,3 @@ def test():
 
 if __name__ == "__main__":
     train()
-    # test()

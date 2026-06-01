@@ -3,7 +3,6 @@ import torch.nn as nn
 import numpy as np
 
 update_v = 'default'
-expansion = 4
 
 
 class ActFun(torch.autograd.Function):
@@ -22,6 +21,9 @@ class ActFun(torch.autograd.Function):
 
 
 class SNNLayer(nn.Module):
+    """
+    🔒 100% 完好继承原版 SNN 物理属性与控制参数
+    """
     def __init__(self, layer, bn=True, thresh=None, thresh_grad=True, decay=0.0, decay_grad=False, bypass_in=False, update_v=update_v):
         super(SNNLayer, self).__init__()
         self.layer = layer
@@ -45,7 +47,6 @@ class SNNLayer(nn.Module):
         self.update_v = update_v
 
     def update_state(self, x, bypass_in):
-
         layer_in = self.bn(self.layer(x)) if self.bn is not None else self.layer(x)
         if bypass_in is not None:
             layer_in += self.bypass_bn(bypass_in) if self.bn is not None else bypass_in
@@ -61,7 +62,6 @@ class SNNLayer(nn.Module):
 
     def reset_state(self, history):
         self.state = [self.state[0].detach(), self.state[1].detach()] if history else [0., 0.]
-        # self.thresh.data = self.thresh.clamp(min=-1., max=1.).data
         self.decay.data = self.decay.clamp(min=0., max=1.).data
 
     def forward(self, x, bypass_in=None):
@@ -69,71 +69,93 @@ class SNNLayer(nn.Module):
         return self.state[1]
 
 
-class BottleneckSNN(nn.Module):
-    def __init__(self, inplanes, planes, downsample=None, stride2=False):
+class ConvNeXtBlockSNN(nn.Module):
+    """
+    🚀 拓扑现代化改造：利用原版 SNNLayer 拼装成的 ConvNeXt 风格脉冲模块
+    （深度空间大核 $7\times7$ + 逆残差 Inverted Bottleneck + 完美承接类脑不应期机制）
+    """
+    def __init__(self, dim):
         super().__init__()
-
-        self.layers = nn.Sequential(
-            SNNLayer(nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)),
-            SNNLayer(nn.Conv2d(planes, planes, kernel_size=3, stride=2 if stride2 else 1, padding=1, bias=False)),
-            # SNNLayer(nn.Conv2d(planes, planes * expansion, kernel_size=1, bias=False))
-        )
-        self.residual_layer = SNNLayer(nn.Conv2d(planes, planes * expansion, kernel_size=1, bias=False), bypass_in=True)
-
-        self.downsample = downsample
+        # 1. 深度大核脉冲卷积层 (groups=dim, kernel=7) -> 建立宏观时空视场
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim, bias=False)
+        self.snn_dw = SNNLayer(self.dwconv, bn=True)
+        
+        # 2. 逆残差通道放大层 (通道放大 4 倍)
+        self.pwconv1 = nn.Conv2d(dim, 4 * dim, kernel_size=1, bias=False)
+        self.snn_pw1 = SNNLayer(self.pwconv1, bn=True)
+        
+        # 3. 通道还原层 + 🔒 完美对齐并挂载原版神经元特有的真实物理残差机制（bypass_in=True）
+        self.pwconv2 = nn.Conv2d(4 * dim, dim, kernel_size=1, bias=False)
+        self.snn_residual = SNNLayer(self.pwconv2, bn=True, bypass_in=True)
 
     def reset_state(self, history):
-        for layer in self.layers:
-            layer.reset_state(history)
-        self.residual_layer.reset_state(history)
+        self.snn_dw.reset_state(history)
+        self.snn_pw1.reset_state(history)
+        self.snn_residual.reset_state(history)
 
     def forward(self, x):
-        out = self.layers(x)
-        residual = self.downsample(x) if self.downsample is not None else x
-
-        out = self.residual_layer(out, residual)
-        out = out[:, :, 1:-1, 1:-1].contiguous()
+        # 记录主路残差
+        residual = x
+        out = self.snn_dw(x)
+        out = self.snn_pw1(out)
+        # 🔒 将残差包裹在类脑神经动力学机制内安全完成不应期叠加
+        out = self.snn_residual(out, bypass_in=residual)
         return out
 
 
-class ResNet2StageSNN(nn.Module):
-    def __init__(self, firstchannels=64, channels=(64, 128), inchannel=3, block_num=(3, 4)):
+class ConvNeXt2StageSNN(nn.Module):
+    """
+    🚀 拓扑现代化改造：全面无缝适配 ConvNeXt-Tiny 的两阶段等比例各向同性脉冲主干
+    """
+    def __init__(self, inchannel=2, out_channels=384):
         super().__init__()
-
-        self.layers = nn.Sequential(
-            SNNLayer(nn.Conv2d(inchannel, firstchannels, kernel_size=7, stride=2, padding=1, bias=False)),
-            *self._make_layer(firstchannels, channels[0], block_num[0], stride2=True),
-            *self._make_layer(channels[0] * expansion, channels[1], block_num[1], stride2=True),
-            SNNLayer(nn.Conv2d(channels[1] * expansion, channels[1] * expansion, kernel_size=1, bias=False),
-                     decay=0., decay_grad=False, update_v='rnn', bn=False)
+        
+        # Stem 下采样：吃进 160x160 的原生平面脉冲，通过 4x4 大卷积直接以无损格平铺方式降维至 40x40
+        self.stem = SNNLayer(nn.Conv2d(inchannel, 96, kernel_size=4, stride=4, padding=0, bias=False), bn=True)
+        
+        # Stage 1 拓扑演进：降维至 20x20
+        self.stage1_down = SNNLayer(nn.Conv2d(96, 192, kernel_size=2, stride=2, padding=0, bias=False), bn=True)
+        self.stage1_blocks = nn.ModuleList([ConvNeXtBlockSNN(dim=192) for _ in range(2)])
+        
+        # Stage 2 拓扑演进：保持 20x20，通道升至 384 维，与大模型老师形成完美物理各向同性
+        self.stage2_down = SNNLayer(nn.Conv2d(192, out_channels, kernel_size=1, stride=1, padding=0, bias=False), bn=True)
+        self.stage2_blocks = nn.ModuleList([ConvNeXtBlockSNN(dim=out_channels) for _ in range(2)])
+        
+        # 🔒 4. 终极留存核对：100% 原汁原味保留 RNN 机制的最后一层，不发火、不截断，提取纯粹的 state[0] 膜电位！
+        self.final_rnn_layer = SNNLayer(
+            nn.Conv2d(out_channels, out_channels, kernel_size=1, bias=False),
+            decay=0., decay_grad=False, update_v='rnn', bn=False
         )
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out')
-        # self.layers[-1].layer.weight.data = torch.zeros_like(self.layers[-1].layer.weight.data)
-
-    def _make_layer(self, inplanes, planes, blocks, stride2=False):
-
-        downsample = nn.Conv2d(inplanes, planes * expansion, kernel_size=3, stride=2 if stride2 else 1, padding=1, bias=False)
-
-        layers = [BottleneckSNN(inplanes, planes, downsample=downsample, stride2=stride2)]
-        layers += [BottleneckSNN(planes * expansion, planes) for i in range(1, blocks)]
-
-        return layers
 
     def reset_state(self, history=False):
-        for layer in self.layers:
-            layer.reset_state(history)
+        self.stem.reset_state(history)
+        self.stage1_down.reset_state(history)
+        for block in self.stage1_blocks: block.reset_state(history)
+        self.stage2_down.reset_state(history)
+        for block in self.stage2_blocks: block.reset_state(history)
+        self.final_rnn_layer.reset_state(history)
 
     def step(self, x):
         """处理单步时间片的输入 x: [B, C, H, W]"""
-        out = self.layers(x) 
-        out_mem = self.layers[-1].state[0]
+        out = self.stem(x)
+        
+        out = self.stage1_down(out)
+        for block in self.stage1_blocks: out = block(out)
+            
+        out = self.stage2_down(out)
+        for block in self.stage2_blocks: out = block(out)
+            
+        # 🔒 5. 原版特异性特写：驱使 RNN 通路演进
+        _ = self.final_rnn_layer(out)
+        # 🔒 稳健提取自回归循环最看重的未硬截断的连续膜电位（Voltage）
+        out_mem = self.final_rnn_layer.state[0]
         return out_mem
 
     def forward(self, net_in):
-        """保留原有 forward 方法以兼容旧有代码或批量预训练"""
         self.reset_state()
         out_list = []
         for t in range(net_in.shape[-1]):
