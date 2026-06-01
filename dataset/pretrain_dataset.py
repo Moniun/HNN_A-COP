@@ -72,32 +72,34 @@ class TianmoucPretrainDataset(Dataset):
             crop = img_rgb[int(curr_y):int(curr_y)+320, int(curr_x):int(curr_x)+640, :] # 形状: [320, 640, 3]
             cop_frames_list.append(crop)
             
-        # 5. 🚀 核心纠正：利用官方单图仿真器接口，在时间轴上执行逐帧物理差分
+        # 5. 利用官方单图仿真器接口，在时间轴上执行逐帧物理差分
         td_list, sd_list = [], []
         
         for t in range(total_steps):
-            # 第一帧缺少前置参考帧，我们按官方逻辑将 img_ref 设为 None 进行自适应生成
             img_target = cop_frames_list[t]
             img_ref = cop_frames_list[t - 1] if t > 0 else None
             
-            # 🚀 完美对齐官方接口参数：输入 0~255 原生 H,W,C 矩阵，设定传感器物理尺寸
-            # 为了契合你网络层要求的 SNN 原生 160x160 分辨率，我们将 interp 设为 False 以导出原始尺寸
             _, _, td_tensor, sd0_tensor, sd1_tensor = run_sim_singleimg(
                 img_target=img_target,
                 img_ref=img_ref,
                 sensor_width=640,
                 sensor_height=320,
-                xy=False,       # 触发标准的 SDL / SDR 空间差分通路
-                interp=False,   # 🚀 核心：不进行上采样，直接吐出硬件原生的 160x160 矩阵维度！
+                xy=False,       
+                interp=False,   
                 device=torch.device('cpu')
             )
             
-            # td_tensor 的原生形状是 [2, 160, 160]，按照你网络层对 AOP_TD 单通道 (1通道) 的定义：
-            # 结合你之前代码中的 aop_td[0:1, ...] 逻辑，我们对其做正负脉冲相减合成单通道，或者取其第0通道：
-            td_combined = (td_tensor[0:1, :, :] - td_tensor[1:2, :, :]) # [1, 160, 160]
+            # 🚀【终极维度防御隔离】：彻底不管仿真器里面有几维，直接一刀切 reshape 成标准形状
+            # 强制将时间差分（TD）抽离出 160x160 纯 2D 平面，规整为单个通道 [1, 160, 160]
+            td_2d = td_tensor.view(-1, 160, 160)[0] # 稳健提取首层单张二维图
+            td_combined = td_2d.unsqueeze(0)        # 强重塑为 [1, 160, 160]
             
-            # sd 通路包含两个方向的空间差分分支，我们将其沿通道拼接为 [2, 160, 160] 格式
-            sd_combined = torch.cat([sd0_tensor.unsqueeze(0), sd1_tensor.unsqueeze(0)], dim=0) # [2, 160, 160]
+            # 强制将空间差分（SD0, SD1）规整为独立的 160x160 二维平面
+            sd0_2d = sd0_tensor.view(-1, 160, 160)[0]
+            sd1_2d = sd1_tensor.view(-1, 160, 160)[0]
+            
+            # 沿通道轴（dim=0）将其拼接为标准的两通道空间差分图 [2, 160, 160]
+            sd_combined = torch.cat([sd0_2d.unsqueeze(0), sd1_2d.unsqueeze(0)], dim=0) # 死死卡在 [2, 160, 160]
             
             td_list.append(td_combined)
             sd_list.append(sd_combined)
