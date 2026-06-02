@@ -47,7 +47,7 @@ def pretrain():
     scheduler = MultiStepLR(optimizer, milestones=[50], gamma=0.1)
     criterion_feat = nn.MSELoss()
     
-    image_dir = "tianmouc_data/pretrain_images"
+    image_dir = "data/pretrain_images"
     os.makedirs(image_dir, exist_ok=True)
     image_paths = glob.glob(os.path.join(image_dir, "*.jpg")) + glob.glob(os.path.join(image_dir, "*.png"))
     

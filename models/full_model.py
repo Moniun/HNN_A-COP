@@ -107,7 +107,7 @@ class TianmoucHNNBackbone(nn.Module):
 
 class TaskHead(nn.Module):
     """
-    🚀 升级适配版预测 Head：输入通道数自动适配为标准的 384 维，完美接驳新特征！
+    🚀 升级适配版预测 Head：完美接驳新特征，满血回归 [cx, cy, w, h] 四维检测框！
     """
     def __init__(self, in_channels=384, num_objects=3):
         super().__init__()
@@ -116,12 +116,13 @@ class TaskHead(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(in_channels, 256),
             nn.ReLU(inplace=True),
-            nn.Linear(256, num_objects * 2)
+            # 🔒 核心修复：把 num_objects * 2 改为 num_objects * 4
+            nn.Linear(256, num_objects * 4) 
         )
     def forward(self, feature_map):
         b = feature_map.shape[0]
         x = self.global_pool(feature_map).view(b, -1)
-        out = self.fc(x).view(b, self.num_objects, 2)
+        out = self.fc(x).view(b, self.num_objects, 4) 
         return out
 
 
