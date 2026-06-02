@@ -92,8 +92,16 @@ def eval():
                 img = cv2.cvtColor(frame_t.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
 
                 for o in range(3):
-                    cx, cy, w, h = pred_loc_arr[o, :, t]
-                    gcx, gcy, gw, gh = gt_loc[o, :, t]
+                    # 从网络中吐出来的是 [0, 1] 相对值，在此原地乘以画布物理尺寸还原
+                    cx = pred_loc_arr[o, 0, t] * 640.0
+                    cy = pred_loc_arr[o, 1, t] * 320.0
+                    w  = pred_loc_arr[o, 2, t] * 640.0
+                    h  = pred_loc_arr[o, 3, t] * 320.0
+
+                    gcx = gt_loc[o, 0, t] * 640.0
+                    gcy = gt_loc[o, 1, t] * 320.0
+                    gw  = gt_loc[o, 2, t] * 640.0
+                    gh  = gt_loc[o, 3, t] * 320.0
 
                     # 解算红色预测框的左上角与右下角
                     px1, py1 = int(cx - w / 2), int(cy - h / 2)
