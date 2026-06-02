@@ -1,4 +1,4 @@
-from .ann_model import Bottleneck, ResNet2Stage
+from .ann_model import Bottleneck
 from .snn_model import ConvNeXt2StageSNN
 from .full_model import TianmoucHNNBackbone, TaskHead, FullModel
 

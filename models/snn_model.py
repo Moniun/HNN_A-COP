@@ -21,13 +21,11 @@ class ActFun(torch.autograd.Function):
 
 
 class SNNLayer(nn.Module):
-    """
-    🔒 100% 完好继承原版 SNN 物理属性与控制参数
-    """
     def __init__(self, layer, bn=True, thresh=None, thresh_grad=True, decay=0.0, decay_grad=False, bypass_in=False, update_v=update_v):
         super(SNNLayer, self).__init__()
         self.layer = layer
-        self.state = [0., 0.]  # [mem, spike]
+        # 🚀 改进点 1：初始化时不再用死板的 [0., 0.] 标量列表，改为 None，交由前向时动态根据输入图片批次卡死重置
+        self.state = [None, None]  # [mem, spike]
 
         if thresh is None:
             thresh = 0.0 if update_v == 'rnn' else 0.5
@@ -51,6 +49,14 @@ class SNNLayer(nn.Module):
         if bypass_in is not None:
             layer_in += self.bypass_bn(bypass_in) if self.bn is not None else bypass_in
 
+        # 🚀 改进点 2：动态防线防御！
+        # 如果当前时步发现状态被重置了，立刻根据当前输入的实际 Batch 大小（b）和特征图长宽，
+        # 在同一个 GPU 上物理开辟最严谨的 4D 全零电位张量！从而 100% 斩断上一张图的显存残留
+        b, _, h, w = layer_in.shape
+        if self.state[0] is None or self.state[0].shape[0] != b:
+            self.state[0] = torch.zeros((b, self.layer.out_channels, h, w), device=layer_in.device)
+            self.state[1] = torch.zeros((b, self.layer.out_channels, h, w), device=layer_in.device)
+
         if self.update_v == 'default':
             self.state[0] = self.state[0] * (1. - self.state[1]) * self.decay + layer_in
         elif self.update_v == 'bursting':
@@ -61,7 +67,13 @@ class SNNLayer(nn.Module):
         self.state[1] = self.act_func(self.state[0] - self.thresh)
 
     def reset_state(self, history):
-        self.state = [self.state[0].detach(), self.state[1].detach()] if history else [0., 0.]
+        # 🚀 改进点 3：更换新图片序列时，利落地清空指针。
+        # 迫使网络在处理下一组 Batch 的新图片航迹时，重新进到上面的防御线去建立完全干净的计算图
+        if history and self.state[0] is not None:
+            self.state = [self.state[0].detach(), self.state[1].detach()]
+        else:
+            self.state = [None, None]
+            
         self.decay.data = self.decay.clamp(min=0., max=1.).data
 
     def forward(self, x, bypass_in=None):

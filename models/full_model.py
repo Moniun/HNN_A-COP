@@ -7,8 +7,8 @@ from models.snn_model import ConvNeXt2StageSNN
 
 class SignalQualityGate(nn.Module):
     """
-    🚀 信号质量自适应决策头：
-    动态评估 COP 大底图、SD 脉冲和 TD 脉冲的隐空间激活品质，输出自适应融合权重 (alpha + beta + gamma = 1)
+    🚀 信号质量自适应决策头 (自平滑优化版)：
+    引入时域门控记忆单元与一阶惯性滤波，防止权重在时间片跨步时发生断崖式阶跃突变。
     """
     def __init__(self, in_channels=384):
         super().__init__()
@@ -16,22 +16,35 @@ class SignalQualityGate(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(in_channels * 3, 64, bias=False),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 3, bias=False),
-            nn.Softmax(dim=-1) 
+            nn.Linear(64, 3, bias=False)
         )
+        # 🔒 核心优化：缓存上一步的注意力系数，实现时域平滑
+        self.register_buffer("last_weights", None, persistent=False)
 
-    def forward(self, cop_feat, sd_feat, td_feat):
+    def forward(self, cop_feat, sd_feat, td_feat, training_mode=True):
         b, c, h, w = cop_feat.shape
         w_cop = self.global_pool(cop_feat).view(b, -1)
         w_sd = self.global_pool(sd_feat).view(b, -1)
         w_td = self.global_pool(td_feat).view(b, -1)
         
         combined_stat = torch.cat([w_cop, w_sd, w_td], dim=1)
-        weights = self.mlp(combined_stat) 
         
-        alpha = weights[:, 0:1].view(b, 1, 1, 1) 
-        beta  = weights[:, 1:2].view(b, 1, 1, 1) 
-        gamma = weights[:, 2:3].view(b, 1, 1, 1) 
+        # 💡 优化点 1：引入温度系数 T=2.0 软化 Softmax，避免非0即1的病态激进输出
+        raw_logits = self.mlp(combined_stat) / 2.0 
+        curr_weights = F.softmax(raw_logits, dim=-1)
+        
+        # 💡 优化点 2：一阶低通惯性演进 (Momentum = 0.7)
+        # 当前步信任度由 30% 的当前瞬时统计量和 70% 的历史置信惯性共同决定
+        if self.last_weights is None or self.last_weights.shape[0] != b:
+            self.last_weights = curr_weights.clone().detach()
+        else:
+            if training_mode:
+                curr_weights = 0.3 * curr_weights + 0.7 * self.last_weights
+                self.last_weights = curr_weights.clone().detach()
+                
+        alpha = curr_weights[:, 0:1].view(b, 1, 1, 1)
+        beta  = curr_weights[:, 1:2].view(b, 1, 1, 1)
+        gamma = curr_weights[:, 2:3].view(b, 1, 1, 1)
         return alpha, beta, gamma
 
 
@@ -58,6 +71,7 @@ class TianmoucHNNBackbone(nn.Module):
 
     def reset_stream_state(self):
         self.current_feature_map = None
+        self.quality_gate.last_weights = None # 🚀 核心优化：刷新航迹时务必重置权重历史
         self.sd_net.reset_state(history=False)
         self.td_net.reset_state(history=False)
 
@@ -69,7 +83,6 @@ class TianmoucHNNBackbone(nn.Module):
 
     def forward(self, rgb_frame, sd_slice, td_slice, is_rgb_available=True):
         if is_rgb_available:
-            # 💡 当初始时刻传入了携带出隧道强光噪声的图像时，此处提取的底图特征将包含干扰伪影
             feats = self.cop_net(rgb_frame)
             self.current_feature_map = feats[2].clone()  
             
@@ -82,11 +95,9 @@ class TianmoucHNNBackbone(nn.Module):
         sd_feat_aligned = F.interpolate(sd_feat, size=(20, 40), mode='nearest')
         td_feat_aligned = F.interpolate(td_feat, size=(20, 40), mode='nearest')
         
-        # 实时根据主路隐空间的激活状态解算互补权重系数
-        alpha, beta, gamma = self.quality_gate(self.current_feature_map, sd_feat_aligned, td_feat_aligned)
+        # 传递 self.training 状态以维持流式验证的一致性
+        alpha, beta, gamma = self.quality_gate(self.current_feature_map, sd_feat_aligned, td_feat_aligned, training_mode=self.training)
         
-        # 🔒 当 alpha (COP认知图权重) 因为突发强光噪声被自适应扣减压低时，
-        # 系统将重兵全部压在 beta 和 gamma 上，驱动不受强光饱和影响的空间差分脉冲流完成完美的无模糊特征纠偏外推！
         dvs_weighted_fuse = beta * sd_feat_aligned + gamma * td_feat_aligned
         feature_delta = self.hu_fuse(dvs_weighted_fuse)
         

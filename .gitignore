@@ -62,6 +62,7 @@ env/
 * copy.py
 test_data_shape.py
 unzip_data.py
+*.sh
 
 # Simulation data
 tmdat_sim/
