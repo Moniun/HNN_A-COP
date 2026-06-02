@@ -44,7 +44,7 @@ def train():
     # 4. 科学优化：只把具有 requires_grad=True 的下游 TaskHead 核心参数送入 Adam 优化器
     # 并且将学习率下调至经典的学术稳健微调值 3e-4，防止梯度在 SNN 计算图上反复震荡爆炸
     trainable_params = [p for p in task_head.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=3e-4)
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-4)
     
     # 加快学习率衰减进程，配合 100 个 Epoch 的短平快微调
     scheduler = MultiStepLR(optimizer, milestones=[30, 60, 80], gamma=0.2)
