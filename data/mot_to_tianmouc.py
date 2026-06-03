@@ -8,16 +8,21 @@ from tqdm import tqdm
 from tianmoucv.sim import run_sim_singleimg
 
 def parse_gt_txt(gt_path):
+    """高效解析 MOT17 原生真实时序标签，保留 object_id 用于死锁追踪"""
     frame_dict = {}
     if not os.path.exists(gt_path): return frame_dict
     with open(gt_path, 'r') as f:
         for line in f:
             parts = line.strip().split(',')
             if len(parts) < 7: continue
-            frame_id, class_id = int(parts[0]), int(parts[7])
+            frame_id = int(parts[0])
+            obj_id = int(parts[1]) # 🔒 提取珍贵的真实轨迹 ID
+            class_id = int(parts[7])
             if class_id not in [1, 3]: continue  # 只提纯行人和车辆
+            
             x1, y1, w, h = float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5])
-            frame_dict.setdefault(frame_id, []).append([x1 + w/2.0, y1 + h/2.0, w, h])
+            # 存储格式增加包含 obj_id: [obj_id, cx, cy, w, h]
+            frame_dict.setdefault(frame_id, []).append([obj_id, x1 + w/2.0, y1 + h/2.0, w, h])
     return frame_dict
 
 def convert_mot_to_tianmouc(src_base_dir, output_dir, T_steps=40, is_test_set=False):
@@ -32,29 +37,13 @@ def convert_mot_to_tianmouc(src_base_dir, output_dir, T_steps=40, is_test_set=Fa
         gt_dict = parse_gt_txt(gt_path)
         
         print(f"🎬 正在全量加载视频序列: {seq_name} (共 {len(all_imgs)} 帧)")
-        full_video_cop, full_video_label = [], []
-        
-        for frame_idx, img_path in enumerate(all_imgs):
+        full_video_cop = []
+        for img_path in all_imgs:
             frame_bgr = cv2.imread(img_path)
-            H_orig, W_orig, _ = frame_bgr.shape
             frame_resized = cv2.resize(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB), (640, 320))
             full_video_cop.append(frame_resized)
             
-            formatted_labels = np.zeros((3, 4), dtype=np.float32)
-            if not is_test_set:
-                raw_boxes = gt_dict.get(frame_idx + 1, [])
-                for o_idx, box in enumerate(raw_boxes[:3]):
-                    cx, cy, w, h = box
-                    # 🔒 核心修复 1：在离线端直接完成 [0, 1] 全量各项同性相对坐标归一化
-                    formatted_labels[o_idx] = [
-                        np.clip(cx / W_orig, 0, 1),
-                        np.clip(cy / H_orig, 0, 1),
-                        w / W_orig,
-                        h / H_orig
-                    ]
-            full_video_label.append(formatted_labels)
-            
-        print(f"⚡ 正在应用官方视频流因果逻辑，榨取高保真 DVS 脉冲特征...")
+        print(f"⚡ 正在全量榨取常开高保真天眸 AOP 差分脉冲特征...")
         full_td_list, full_sd_list = [], []
         for t in range(len(all_imgs)):
             img_target = full_video_cop[t]
@@ -70,17 +59,63 @@ def convert_mot_to_tianmouc(src_base_dir, output_dir, T_steps=40, is_test_set=Fa
         full_cop_arr = np.stack(full_video_cop, axis=0).transpose(3, 1, 2, 0)
         full_td_arr = np.stack(full_td_list, axis=-1)
         full_sd_arr = np.stack(full_sd_list, axis=-1)
-        full_label_arr = np.stack(full_video_label, axis=-1)
         
-        # 3. 后端存储切块
+        # 3. 🔒 核心重构：后端分块切片并执行“跨帧 ID 死锁匹配”
         num_segments = len(all_imgs) // T_steps
         for seg_idx in range(num_segments):
             s_t, e_t = seg_idx * T_steps, seg_idx * T_steps + T_steps
             
-            segment_labels = full_label_arr[..., s_t:e_t]
+            segment_labels_list = []
             
-            # 🔒 核心修复 2：如果不是测试集，并且当前连续 40 帧内没有任何有效的目标框（绝对和全零一致）
-            # 直接抛弃，绝不写入硬盘污染网络！
+            if is_test_set:
+                # 测试集不需要真实标签，填充齐整的全零占位矩阵
+                for t in range(T_steps):
+                    segment_labels_list.append(np.zeros((3, 4), dtype=np.float32))
+            else:
+                # 🔒 黄金锁定机制：在当前 40 帧片段的第 0 帧，挑出面积最大的前 3 个目标的真实 ID
+                start_real_frame_id = s_t + 1
+                start_objects = gt_dict.get(start_real_frame_id, [])
+                
+                # 按物体面积 (w * h) 从大到小排序，锁定最显著的目标
+                start_objects_sorted = sorted(start_objects, key=lambda x: x[3] * x[4], reverse=True)
+                locked_ids = [obj[0] for obj in start_objects_sorted[:3]]
+                
+                # 如果当前片段开局没有任何车或行人，直接跳过不浪费算力
+                if len(locked_ids) == 0:
+                    continue
+                
+                # 重新去原视频里核对，读取原图尺寸以便进行坐标压缩
+                sample_img = cv2.imread(all_imgs[s_t])
+                H_orig, W_orig, _ = sample_img.shape
+                
+                # 开始在时间轴上推进 40 步
+                for t in range(T_steps):
+                    real_frame_id = s_t + t + 1
+                    current_frame_all_objects = gt_dict.get(real_frame_id, [])
+                    
+                    # 建立 {obj_id: [cx, cy, w, h]} 的快速索引字典
+                    current_obj_idx_dict = {obj[0]: obj[1:] for obj in current_frame_all_objects}
+                    
+                    formatted_labels = np.zeros((3, 4), dtype=np.float32)
+                    # 🔒 死锁防线：按照第 0 帧锁定的固定 ID 顺序，去给当前的 3 个插槽填框
+                    for slot_idx, target_id in enumerate(locked_ids):
+                        if target_id in current_obj_idx_dict:
+                            cx, cy, w, h = current_obj_idx_dict[target_id]
+                            # 相对归一化压缩到 [0, 1] 空间，抹平 MSE 平方惩罚效应
+                            formatted_labels[slot_idx] = [
+                                np.clip(cx / W_orig, 0, 1),
+                                np.clip(cy / H_orig, 0, 1),
+                                w / W_orig,
+                                h / H_orig
+                            ]
+                        else:
+                            # 如果该目标中途断档或被完全遮挡，该插槽保持全零占位，绝对不填别人！
+                            pass
+                    segment_labels_list.append(formatted_labels)
+            
+            segment_labels = np.stack(segment_labels_list, axis=-1) # [3, 4, 40]
+            
+            # 如果这 40 帧里全是全零（目标中途全都消失了），抛弃该片段，保证数据纯净
             if not is_test_set and np.allclose(segment_labels, 0):
                 continue
                 
@@ -90,21 +125,18 @@ def convert_mot_to_tianmouc(src_base_dir, output_dir, T_steps=40, is_test_set=Fa
             np.save(os.path.join(output_dir, f"{seq_name}_seg_{seg_idx:02d}_label.npy"), segment_labels)
             global_seq_idx += 1
 
-    print(f"\n======================= 🎉 Standard MOT17 绝对连续大底盘落盘成功！ =======================")
+    print(f"\n======================= 🎉 MOT17 跨帧轨迹 ID 死锁固化成功！ =======================")
 
 if __name__ == "__main__":
-    # 🛠️ 第一阶段点火：全量洗出训练集（有标签，进 train 目录）
     convert_mot_to_tianmouc(
         src_base_dir="/root/autodl-tmp/HNN_A-COP/data/mot17_project/extracted_mot17/MOT17/train",
         output_dir="/root/autodl-tmp/HNN_A-COP/data/mot17_project/tianmouc_vid_proc/train",
-        T_steps=25,
+        T_steps=40,
         is_test_set=False
     )
-    
-    # 🛠️ 第二阶段点火：全量洗出测试集（无标签，进 val 目录，无缝匹配 DataLoader）
     convert_mot_to_tianmouc(
         src_base_dir="/root/autodl-tmp/HNN_A-COP/data/mot17_project/extracted_mot17/MOT17/test",
         output_dir="/root/autodl-tmp/HNN_A-COP/data/mot17_project/tianmouc_vid_proc/val",
-        T_steps=25,
+        T_steps=40,
         is_test_set=True
     )

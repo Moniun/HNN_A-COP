@@ -105,25 +105,46 @@ class TianmoucHNNBackbone(nn.Module):
         return self.current_feature_map
 
 
+# 修改 models/full_model.py 内部的 TaskHead
 class TaskHead(nn.Module):
     """
-    🚀 升级适配版预测 Head：完美接驳新特征，满血回归 [cx, cy, w, h] 四维检测框！
+    🚀 学术级全卷积解耦检测头 (Decoupled Task Head)
+    保持 20x40 空间特征分辨率，通过独立的卷积分支解耦位置定位，彻底抹除非前景物体的误触发！
     """
     def __init__(self, in_channels=384, num_objects=3):
         super().__init__()
         self.num_objects = num_objects
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Sequential(
-            nn.Linear(in_channels, 256),
-            nn.ReLU(inplace=True),
-            # 🔒 核心修复：把 num_objects * 2 改为 num_objects * 4
-            nn.Linear(256, num_objects * 4) 
+        
+        # 共享特征前置层
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
         )
+        
+        # 专攻边界框回归的分支通路
+        self.reg_convs = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+        # 每个空间网格位置密集吐出 3 * 4 个预测坐标通道
+        self.reg_pred = nn.Conv2d(256, num_objects * 4, kernel_size=1)
+        
+        # 自适应空间池化，用于将 20x40 的精细空间响应映射到指定的 Few-Shot 物体数量上
+        self.spatial_pool = nn.AdaptiveAvgPool2d((1, 1))
+
     def forward(self, feature_map):
-        b = feature_map.shape[0]
-        x = self.global_pool(feature_map).view(b, -1)
-        out = self.fc(x).view(b, self.num_objects, 4) 
-        return out
+        # 输入 feature_map Shape: [B, 384, 20, 40]
+        x = self.stem(feature_map)  # -> [B, 256, 20, 40]
+        
+        reg_feat = self.reg_convs(x)
+        reg_out = self.reg_pred(reg_feat)  # -> [B, num_objects * 4, 20, 40]
+        
+        # 通过自适应池化聚合空间局部特征
+        reg_out = self.spatial_pool(reg_out).view(feature_map.shape[0], self.num_objects, 4)
+        # 吐出标准的 [B, num_objects, 4] 相对坐标
+        return reg_out
 
 
 class FullModel(nn.Module):
