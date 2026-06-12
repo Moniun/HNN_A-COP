@@ -54,24 +54,16 @@ def train():
     for param in backbone.cop_net.parameters():
         param.requires_grad = False
     
-    # 3. 🌟 满血释放：确保时序脉冲两路、质量网关、HUs融合精炼层及检测头梯度 100% 畅通
-    for param in backbone.sd_net.parameters(): param.requires_grad = True
-    for param in backbone.td_net.parameters(): param.requires_grad = True
-    for param in backbone.quality_gate.parameters(): param.requires_grad = True
-    for param in backbone.hu_fuse_sd.parameters(): param.requires_grad = True
-    for param in backbone.hu_fuse_td.parameters(): param.requires_grad = True
+    # 3. 🌟 满血释放：确保时序脉冲通路、HUs融合精炼层及检测头梯度 100% 畅通
+    for param in backbone.dvs_net.parameters(): param.requires_grad = True
+    for param in backbone.hu_fuse_dvs.parameters(): param.requires_grad = True
     for param in task_head.parameters(): param.requires_grad = True
 
     # 4. 🎛️ 差别调配：将释放出的可调优组件共同送入优化器
-    # 学术最佳实践：下游检测头刚跑通路，分配标准的微调步长 (3e-4)；
-    # 脉冲中枢和决策网关已经具有自监督先验，分配较小的基础步长 (1e-4) 动态微调，防止时序特征撕裂
     optimizer = torch.optim.Adam([
         {'params': task_head.parameters(), 'lr': 3e-4},
-        {'params': backbone.sd_net.parameters(), 'lr': 3e-4},
-        {'params': backbone.td_net.parameters(), 'lr': 3e-4},
-        {'params': backbone.quality_gate.parameters(), 'lr': 3e-4},
-        {'params': backbone.hu_fuse_sd.parameters(), 'lr': 3e-4},
-        {'params': backbone.hu_fuse_td.parameters(), 'lr': 3e-4}
+        {'params': backbone.dvs_net.parameters(), 'lr': 3e-4},
+        {'params': backbone.hu_fuse_dvs.parameters(), 'lr': 3e-4}
     ])
     
     print("====== 🚀 [局部微调引擎启动] ConvNeXt-Tiny 已安全冻结，脉冲两路与决策头联合微调中 ======")

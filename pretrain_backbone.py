@@ -107,8 +107,6 @@ def pretrain():
                 current_snapshot_idx = (t // base_T_interval) * base_T_interval
                 
                 input_rgb_frame = cop_seq[..., current_snapshot_idx]
-                if is_rgb_available:
-                    input_rgb_frame = inject_extreme_noise_to_batch(input_rgb_frame, prob=0.3)
                 
                 current_feat = backbone(
                     rgb_frame=input_rgb_frame, 
