@@ -42,6 +42,10 @@ def run_val_visual():
     # 🔒 核心动力学长线记忆指针：记录上一个分块所属的视频主名
     last_video_name = None
 
+    # 设置测试的视频数量上限
+    max_videos_to_test = 5  # 最多测试5个视频
+    videos_tested = 0
+    
     with torch.no_grad():
         for step, data in enumerate(train_val_data):
             cop, td, sd, cop_loc, target_loc = data
@@ -54,9 +58,16 @@ def run_val_visual():
             # 🔒 只有更换全新视频序列时，才执行全盘重置！
             # 处于同一个训练长视频的不同分块内部时，SNN 膜电位和信号质量门控惯性 100% 连续演进！
             if current_video_name != last_video_name:
+                # 检查是否已测试足够数量的视频
+                if videos_tested >= max_videos_to_test:
+                    print(f"✅ 已完成 {max_videos_to_test} 个视频的测试，提前退出。")
+                    break
+                
                 print(f"📡 [场景大阶跃点火] 检测到进入全新训练大场景: {current_video_name}，脉冲状态流归零初始化。")
+                print(f"   (当前已测试 {videos_tested}/{max_videos_to_test} 个视频)")
                 backbone.reset_stream_state()
                 last_video_name = current_video_name
+                videos_tested += 1
 
             base_T_interval = 10
             T_steps = td.shape[-1]
@@ -86,7 +97,7 @@ def run_val_visual():
                 if frame_t.max() <= 1.01:
                     frame_t = frame_t * 255.0
                 frame_t = np.clip(frame_t, 0, 255).astype(np.uint8)
-                img = cv2.cvtColor(frame_t.transpose(1, 2, 0), cv2.COLOR_RGB2BGR)
+                img = cv2.cvtColor(frame_t.transpose(1, 2, 0), cv2.COLOR_BGR2RGB)
 
                 for o in range(3):
                     # 🔒 从网络中吐出来和硬盘读出来的都是 [0, 1] 相对值，原地乘以画布物理尺寸还原
@@ -121,10 +132,9 @@ def run_val_visual():
                     # 🟥 绘制红色 HNN 脉冲流预测框
                     img = cv2.rectangle(img, (px1, py1), (px2, py2), (0, 0, 255), 2) 
 
-                plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                plt.imshow(img)
                 plt.pause(0.01)
-                video.write(img)
-            break
+                video.write(cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
 
     video.release()
     print("📊 成果大片渲染完毕，双框对比成果已安全导出至项目根目录下的 train_demo.mp4！")

@@ -14,14 +14,28 @@ from models import TianmoucHNNBackbone, TaskHead
 
 def train():
     epoch_num = 50
-    save_period = 5  
+    save_period = 5
     base_T_interval = 10  # 🔒 核心对齐：锁死 10 帧为周期的流式门控注意力唤醒频率！
     
-    load_backbone_path = "ckpt/HNN_backbone.ckpt"  
+    # load_backbone_path = "ckpt/HNN_backbone.ckpt" 
+    load_backbone_path = None
     save_ckpt_path = "ckpt/HNN_detection_head.ckpt"
     Path(os.path.dirname(save_ckpt_path)).mkdir(parents=True, exist_ok=True)
 
     writer = SummaryWriter('summary/task_head/train_predictor_{}'.format(int(time.time())))
+    
+    # 📝 创建日志文件
+    log_dir = "train_logs"
+    os.makedirs(log_dir, exist_ok=True)  # 确保目录存在
+    log_file_path = f"{log_dir}/train_log_{int(time.time())}.txt"
+    log_file = open(log_file_path, 'w')
+    log_file.write(f"====== 训练日志 ======\n")
+    log_file.write(f"开始时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    log_file.write(f"总 epoch: {epoch_num}\n")
+    log_file.write(f"基础学习率: task_head=3e-4, backbone=1e-4\n")
+    log_file.write(f"数据集大小: {len(TianmoucStreamingDataset(test=False))}\n")
+    log_file.write("========================================\n\n")
+    print(f"📝 日志文件已创建: {log_file_path}")
     
     backbone = TianmoucHNNBackbone().cuda()
     task_head = TaskHead(in_channels=384, num_objects=3).cuda()
@@ -31,13 +45,43 @@ def train():
         backbone.load_state_dict(state_dict.get('backbone', {}), strict=False)
         print(f"====== 📡 [Backbone 先验合体成功] 成功无缝加载预训练大核主干网络重量级参数 ======")
     
-    # 冻结backbone网络
+    # ==================== 🔒 黄金路由：异构异步端到端局部微调防线 ====================
+    # 1. 彻底解冻全盘网络，以便我们在子模块层面进行个性化梯度剪裁
+    backbone.train()
+    task_head.train()
+    
+    # 2. ❌ 强行锁死：将 ConvNeXt-Tiny（空间 RGB 编码主路）的所有参数抽干梯度，绝对保持冻结
+    for param in backbone.cop_net.parameters():
+        param.requires_grad = False
+    
+    # 3. 🌟 满血释放：确保时序脉冲两路、质量网关、HUs融合精炼层及检测头梯度 100% 畅通
+    for param in backbone.sd_net.parameters(): param.requires_grad = True
+    for param in backbone.td_net.parameters(): param.requires_grad = True
+    for param in backbone.quality_gate.parameters(): param.requires_grad = True
+    for param in backbone.hu_fuse_sd.parameters(): param.requires_grad = True
+    for param in backbone.hu_fuse_td.parameters(): param.requires_grad = True
+    for param in task_head.parameters(): param.requires_grad = True
+
+    # 4. 🎛️ 差别调配：将释放出的可调优组件共同送入优化器
+    # 学术最佳实践：下游检测头刚跑通路，分配标准的微调步长 (3e-4)；
+    # 脉冲中枢和决策网关已经具有自监督先验，分配较小的基础步长 (1e-4) 动态微调，防止时序特征撕裂
+    optimizer = torch.optim.Adam([
+        {'params': task_head.parameters(), 'lr': 3e-4},
+        {'params': backbone.sd_net.parameters(), 'lr': 3e-4},
+        {'params': backbone.td_net.parameters(), 'lr': 3e-4},
+        {'params': backbone.quality_gate.parameters(), 'lr': 3e-4},
+        {'params': backbone.hu_fuse_sd.parameters(), 'lr': 3e-4},
+        {'params': backbone.hu_fuse_td.parameters(), 'lr': 3e-4}
+    ])
+    
+    print("====== 🚀 [局部微调引擎启动] ConvNeXt-Tiny 已安全冻结，脉冲两路与决策头联合微调中 ======")
+    # ==============================================================================
     # for param in backbone.parameters():
     #     param.requires_grad = False
     # backbone.eval()  
     
-    trainable_params = [p for p in task_head.parameters() if p.requires_grad]
-    optimizer = torch.optim.Adam(trainable_params, lr=3e-4) # 恢复到标准的 3e-4 微调黄金学习率
+    # trainable_params = [p for p in task_head.parameters() if p.requires_grad]
+    # optimizer = torch.optim.Adam(trainable_params, lr=3e-4) # 恢复到标准的 3e-4 微调黄金学习率
     
     scheduler = MultiStepLR(optimizer, milestones=[30, 60, 80], gamma=0.2)
     criterion = nn.MSELoss()
@@ -101,12 +145,27 @@ def train():
         epoch_avg_loss = epoch_total_loss / epoch_step_count
         print(f"\n📊 [Epoch {epoch+1}/{epoch_num}] 训练完成 | 平均 MSE Loss = {epoch_avg_loss:.4f}")
         
+        # 📝 记录到日志文件
+        log_file.write(f"[Epoch {epoch+1}/{epoch_num}]\n")
+        log_file.write(f"  平均 MSE Loss: {epoch_avg_loss:.6f}\n")
+        log_file.write(f"  最后一步 Loss: {mean_loss.item():.6f}\n")
+        log_file.write(f"  学习率: {scheduler.get_last_lr()[0]:.6e}\n")
+        log_file.write("\n")
+        log_file.flush()  # 立即写入文件
+        
         if (epoch + 1) % save_period == 0 or (epoch + 1) == epoch_num:
-            print(f"💾 [Epoch {epoch+1}] 成功保存微调成果, 当前 Loss={mean_loss.item():.4f}")
+            print(f"💾 [Epoch {epoch+1}] 保存微调成果")
             torch.save({
                 'backbone': backbone.state_dict(),
                 'head': task_head.state_dict()
             }, save_ckpt_path)
+    
+    # 📝 训练结束，关闭日志文件
+    log_file.write("========================================\n")
+    log_file.write(f"训练结束时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+    log_file.write("====== 训练完成 ======\n")
+    log_file.close()
+    print(f"📝 日志文件已关闭: {log_file_path}")
 
 if __name__ == "__main__":
     train()

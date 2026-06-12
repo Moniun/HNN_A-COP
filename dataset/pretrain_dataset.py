@@ -3,8 +3,42 @@ import numpy as np
 import cv2
 import torch
 from torch.utils.data import Dataset
-from tianmoucv.sim import run_sim_singleimg 
+from tianmoucv.sim import run_sim_singleimg
+import torch.nn.functional as F
 
+
+def torch_td_denoise(td_tensor, var_fil_ksize=3, var_th=0.5, adapt_th_min=5, adapt_th_max=8):
+    """
+    PyTorch 版本的 TD 去噪（与官方 denoise_defualt_args 参数一致）
+    
+    参数:
+        td_tensor: [H, W] 或 [B, H, W] 的 tensor
+        var_fil_ksize: 方差滤波核大小（官方默认: 3）
+        var_th: 方差阈值（官方默认: 0.5）
+        adapt_th_min: 自适应阈值最小值（官方默认: 3）
+        adapt_th_max: 自适应阈值最大值（官方默认: 8）
+    """
+    if td_tensor.dim() == 2:
+        td_tensor = td_tensor.unsqueeze(0)
+    
+    pad = var_fil_ksize // 2
+    td_padded = F.pad(td_tensor, [pad]*4, mode='reflect')
+    windows = td_padded.unfold(1, var_fil_ksize, 1).unfold(2, var_fil_ksize, 1)
+    windows = windows.contiguous().view(td_tensor.shape[0], td_tensor.shape[1], td_tensor.shape[2], -1)
+    
+    var = torch.var(windows, dim=-1)
+    mask = var > var_th
+    adapt_th = adapt_th_min + (adapt_th_max - adapt_th_min) * (var / var.max())
+    
+    td_denoised = td_tensor.clone()
+    td_denoised[mask & (torch.abs(td_tensor) < adapt_th)] = 0
+    return td_denoised.squeeze()
+
+def torch_sd_denoise(sd_tensor, var_fil_ksize=3, var_th=1.0, adapt_th_min=8, adapt_th_max=15):
+    """PyTorch 版本的 SD 去噪（与官方参数一致）"""
+    sdl_denoised = torch_td_denoise(sd_tensor[0], var_fil_ksize, var_th, adapt_th_min, adapt_th_max)
+    sdr_denoised = torch_td_denoise(sd_tensor[1], var_fil_ksize, var_th, adapt_th_min, adapt_th_max)
+    return torch.stack([sdl_denoised, sdr_denoised], dim=0)
 
 class TianmoucPretrainDataset(Dataset):
     def __init__(self, image_paths, base_T=10):
@@ -73,7 +107,7 @@ class TianmoucPretrainDataset(Dataset):
         td_list, sd_list = [], []
         for t in range(total_steps):
             img_target = cop_frames_list[t]
-            img_ref = cop_frames_list[t - 1] if t > 0 else None
+            img_ref = cop_frames_list[t - 1] if t > 0 else cop_frames_list[t]
             
             _, _, td_tensor, sd0_tensor, sd1_tensor = run_sim_singleimg(
                 img_target=img_target,
@@ -82,9 +116,29 @@ class TianmoucPretrainDataset(Dataset):
                 sensor_height=320,
                 xy=False,       
                 interp=False,   
-                device=torch.device('cpu')
+                device=torch.device('cpu'),
+                # ✅ 关闭所有噪声参数
+                sensor_fixed_noise_prob=0.0,
+                sensor_random_noise_prob=0.0,
+                sensor_fixed_noise_std_ch0=0.0,
+                sensor_fixed_noise_std_ch12=0.0,
+                sensor_random_noise_std=0.0,
+                sensor_poisson_lambda=0,
+                gray_weight_jitter=0.0,
+                gray_gain_min=1.0,
+                gray_gain_max=1.0,
+                sim_threshold_range=(0.0, 0.0),
+                
+                # ✅ 新增：强制关闭 FPN 噪声（通过设置参数使噪声为零）
+                sensor_fixed_noise_mean_ch0=0.0,  # 均值设为0
+                sensor_fixed_noise_mean_ch12=0.0   # 均值设为0
             )
             
+            # 去噪
+            td_tensor = torch_td_denoise(td_tensor.float())
+            sd0_tensor = torch_sd_denoise(sd0_tensor.float())
+            sd1_tensor = torch_sd_denoise(sd1_tensor.float())
+
             td_2d = td_tensor.view(-1, 160, 160)[0] 
             td_combined = td_2d.unsqueeze(0)        
             

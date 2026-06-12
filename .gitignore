@@ -71,3 +71,8 @@ tianmouc_data/
 data/*
 !data/*.py
 !data/**/*.py
+
+# log
+train_logs/
+
+*.ipynb

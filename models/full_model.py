@@ -62,11 +62,18 @@ class TianmoucHNNBackbone(nn.Module):
         
         self.quality_gate = SignalQualityGate(in_channels=384)
         
-        self.hu_fuse = nn.Sequential(
+        self.hu_fuse_sd = nn.Sequential(
             nn.Conv2d(384, 384, kernel_size=1, bias=False), 
             nn.BatchNorm2d(384),
             nn.ReLU(inplace=True)
         )
+
+        self.hu_fuse_td = nn.Sequential(
+            nn.Conv2d(384, 384, kernel_size=1, bias=False), 
+            nn.BatchNorm2d(384),
+            nn.ReLU(inplace=True)
+        )
+
         self.register_buffer("current_feature_map", None, persistent=False)
 
     def reset_stream_state(self):
@@ -98,10 +105,12 @@ class TianmoucHNNBackbone(nn.Module):
         # 传递 self.training 状态以维持流式验证的一致性
         alpha, beta, gamma = self.quality_gate(self.current_feature_map, sd_feat_aligned, td_feat_aligned, training_mode=self.training)
         
-        dvs_weighted_fuse = beta * sd_feat_aligned + gamma * td_feat_aligned
-        feature_delta = self.hu_fuse(dvs_weighted_fuse)
+        # dvs_weighted_fuse = beta * sd_feat_aligned + gamma * td_feat_aligned
+        # feature_delta = self.hu_fuse(dvs_weighted_fuse)
+        feature_delta_sd = self.hu_fuse_sd(sd_feat_aligned)
+        feature_delta_td = self.hu_fuse_td(td_feat_aligned)
         
-        self.current_feature_map = alpha * self.current_feature_map + feature_delta
+        self.current_feature_map = alpha * self.current_feature_map + beta * feature_delta_sd + gamma * feature_delta_td
         return self.current_feature_map
 
 
